@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.3] — 2026-07-26
+
+### Changed
+- Navigation now uses compact view, agent, environment, project, session-status,
+  and session-sort controls with a visible sidebar toggle and grouped sections.
+- Compact windows retain direct project access instead of hiding the only project
+  list, and new sessions launched from Overview use the latest available project.
+- Large session and asset collections render in bounded batches; project filtering
+  is animation-frame throttled and cleanup search is debounced.
+
+### Fixed
+- Rapid project, session, search, or cleanup navigation can no longer display a
+  stale response from an earlier selection.
+- Quick Open no longer keeps unusable session entries after leaving a project.
+- Cleanup presets reset unrelated criteria, session and asset filters remain
+  independent, and asset filter controls accurately reflect active values.
+
 ## [2.0.2] — 2026-07-21
 
 ### Changed

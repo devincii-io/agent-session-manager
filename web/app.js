@@ -47,10 +47,18 @@ const State = {
   overviewDirty: false,
   liveRefreshInFlight: false,
   liveRefreshQueued: false,
-  appVersion: "2.0.2",
+  appVersion: "2.0.3",
   update: null,
   updateBusy: "",
   updateRequested: false,
+  sessionFilter: storedSetting("sessionFilter", "all"),
+  sessionSort: storedSetting("sessionSort", "recent"),
+  sessionLimit: 150,
+  requestSeq: { overview: 0, project: 0, session: 0, search: 0, cleanup: 0 },
+  cleanupFilterSets: {
+    sessions: { query: "", age: 0, minSize: 0, maxTurns: -1, state: "active", asset: "" },
+    assets: { query: "", age: 0, minSize: 0, maxTurns: -1, state: "all", asset: "" },
+  },
 };
 
 const MAX_BROWSER_TRANSCRIPT_EVENTS = 1200;
@@ -349,8 +357,18 @@ function renderRail() {
     </div>`).join("") || `<div class="faint" style="padding:10px;font-size:12px">No projects found.</div>`;
   const count = document.getElementById("project-count");
   if (count) count.textContent = String(list.length);
+  renderProjectSwitch(State.projects);
   enhanceInteractive(document.getElementById("project-list"));
   updateChrome();
+}
+
+function renderProjectSwitch(projects = State.projects) {
+  const select = document.getElementById("project-switch");
+  if (!select) return;
+  const previous = State.projectId || "";
+  select.innerHTML = `<option value="">All projects</option>${projects.map((p) =>
+    `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(agentInfo(p.provider).short)}</option>`).join("")}`;
+  select.value = projects.some((p) => p.id === previous) ? previous : "";
 }
 
 const AGENTS = {
@@ -394,15 +412,37 @@ function renderListPane() {
 
 function projectListPane() {
   const p = State.projects.find((x) => x.id === State.projectId);
-  const sessions = State.sessions.filter(sessionMatchesSearch);
+  const matching = State.sessions.filter(sessionMatchesSearch).filter((s) => {
+    if (State.sessionFilter === "active") return !!s.active;
+    if (State.sessionFilter === "idle") return !s.active;
+    return true;
+  });
+  matching.sort((a, b) => State.sessionSort === "context"
+    ? (b.context_pct || 0) - (a.context_pct || 0)
+    : State.sessionSort === "turns"
+      ? (b.assistant_messages || 0) - (a.assistant_messages || 0)
+      : (b.mtime || 0) - (a.mtime || 0));
+  const sessions = matching.slice(0, State.sessionLimit);
   const sm = State.selectMode;
   const t = selTotals();
   return `<div class="list-head">
       <h2>${esc(p ? p.name : "Sessions")}</h2>
       <div class="sub" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-        <span>${sessions.length} sessions${p && p.memory_count ? ` · ${p.memory_count} memories` : ""}</span>
+        <span>${matching.length} sessions${p && p.memory_count ? ` · ${p.memory_count} memories` : ""}</span>
         <button class="link-btn" data-action="toggle-select">${sm ? "Cancel" : "Select"}</button>
       </div>
+      ${sm ? "" : `<div class="session-list-tools">
+        <label><span>Status</span><select data-session-filter="status" aria-label="Filter sessions by status">
+          <option value="all" ${State.sessionFilter === "all" ? "selected" : ""}>All</option>
+          <option value="active" ${State.sessionFilter === "active" ? "selected" : ""}>Active</option>
+          <option value="idle" ${State.sessionFilter === "idle" ? "selected" : ""}>History</option>
+        </select></label>
+        <label><span>Sort</span><select data-session-sort aria-label="Sort sessions">
+          <option value="recent" ${State.sessionSort === "recent" ? "selected" : ""}>Recent</option>
+          <option value="context" ${State.sessionSort === "context" ? "selected" : ""}>Context</option>
+          <option value="turns" ${State.sessionSort === "turns" ? "selected" : ""}>Turns</option>
+        </select></label>
+      </div>`}
       ${sm ? `<div class="mini-bar">
         <span>${t.count ? `<b>${t.count}</b> selected · ${fmt.bytes(t.bytes)}` : "Tap sessions to select"}</span>
         <span style="display:flex;gap:6px">
@@ -417,6 +457,7 @@ function projectListPane() {
         <div class="file-meta">›</div>
       </div>`}
       ${sessions.map(sessionCard).join("") || '<div class="faint" style="padding:14px;font-size:12px">No sessions.</div>'}
+      ${matching.length > sessions.length ? `<button class="load-more" data-action="sessions-more">Show ${Math.min(150, matching.length - sessions.length)} more <span>${sessions.length} of ${matching.length}</span></button>` : ""}
     </div>`;
 }
 
@@ -501,11 +542,14 @@ function searchView() {
 }
 
 async function runGlobalSearch(q) {
+  const request = ++State.requestSeq.search;
   State.view = "search";
   State.searchQuery = q;
   State.searchResults = null;
   renderListPane(); renderDetail();
-  State.searchResults = await call("searchProvider", State.agent, sourceScope(), q);
+  const results = await call("searchProvider", State.agent, sourceScope(), q);
+  if (request !== State.requestSeq.search || State.view !== "search" || State.searchQuery !== q) return;
+  State.searchResults = results;
   renderDetail();
 }
 
@@ -1404,7 +1448,9 @@ function filteredCleanupSessions() {
 }
 
 function applyCleanupView(id) {
-  const f = State.cleanupFilters;
+  const f = { query: "", age: 0, minSize: 0, maxTurns: -1, state: "active", asset: "" };
+  State.cleanupFilters = f;
+  State.cleanupFilterSets.sessions = f;
   if (id === "stale") { f.age = 30; f.minSize = 0; f.state = "active"; }
   if (id === "large") { f.minSize = 10e6; f.age = 0; f.state = "active"; }
   if (id === "empty") { f.maxTurns = 0; f.age = 0; f.state = "active"; }
@@ -1497,20 +1543,21 @@ function filteredAssets() {
 
 function cleanupAssetsView() {
   if (!State.assets) return `<div class="detail-inner"><div class="skeleton">Inventorying images and agent storage…</div></div>`;
-  const items = filteredAssets();
+  const allItems = filteredAssets();
+  const items = allItems.slice(0, State.cleanupLimit);
   const selected = [...State.assetSel.values()];
   const bytes = selected.reduce((sum, item) => sum + item.size_bytes, 0);
-  const safe = items.filter((item) => !item.protected && item.source_writable);
+  const safe = allItems.filter((item) => !item.protected && item.source_writable);
   return `<div class="detail-inner"><div class="page-head"><div><h1>Assets &amp; images</h1><div class="ph-sub">Clean storage categories independently from transcripts. Recent data stays protected for 10 minutes.</div></div></div>
-    <div class="tiles">${tile("Asset groups", (State.assets.items || []).length, fmt.bytes(State.assets.total_bytes), false, "Uploads, legacy images, file history, tasks, environments and scratchpads")}${tile("Matching", items.length, fmt.bytes(items.reduce((n, x) => n + x.size_bytes, 0)), false)}${tile("Selected", selected.length, fmt.bytes(bytes) + " reclaimable", !!selected.length)}</div>
+    <div class="tiles">${tile("Asset groups", (State.assets.items || []).length, fmt.bytes(State.assets.total_bytes), false, "Uploads, legacy images, file history, tasks, environments and scratchpads")}${tile("Matching", allItems.length, fmt.bytes(allItems.reduce((n, x) => n + x.size_bytes, 0)), false)}${tile("Selected", selected.length, fmt.bytes(bytes) + " reclaimable", !!selected.length)}</div>
     <div class="section"><div class="cleanup-tabs"><button class="chip" data-action="cleanup-mode" data-mode="sessions">Sessions</button><button class="chip on" data-action="cleanup-mode" data-mode="assets">Assets &amp; images</button></div>
       <div class="filter-grid"><input class="s-input" data-clean-filter="query" value="${esc(State.cleanupFilters.query)}" placeholder="Category, project or session">
         <select class="tune-select" data-clean-filter="age"><option value="0">Any age</option><option value="7" ${State.cleanupFilters.age === 7 ? "selected" : ""}>Inactive 7d+</option><option value="30" ${State.cleanupFilters.age === 30 ? "selected" : ""}>Inactive 30d+</option><option value="90" ${State.cleanupFilters.age === 90 ? "selected" : ""}>Inactive 90d+</option></select>
-        <select class="tune-select" data-clean-filter="minSize"><option value="0">Any size</option><option value="100000">100 KB+</option><option value="1000000">1 MB+</option><option value="10000000">10 MB+</option></select>
+        <select class="tune-select" data-clean-filter="minSize"><option value="0" ${State.cleanupFilters.minSize === 0 ? "selected" : ""}>Any size</option><option value="100000" ${State.cleanupFilters.minSize === 100000 ? "selected" : ""}>100 KB+</option><option value="1000000" ${State.cleanupFilters.minSize === 1000000 ? "selected" : ""}>1 MB+</option><option value="10000000" ${State.cleanupFilters.minSize === 10000000 ? "selected" : ""}>10 MB+</option></select>
         <select class="tune-select" data-clean-filter="asset"><option value="">All categories</option>${["uploads", "legacy_images", "file_history", "tasks", "session_env", "scratchpad"].map((kind) => `<option value="${kind}" ${State.cleanupFilters.asset === kind ? "selected" : ""}>${kind.replaceAll("_", " ")}</option>`).join("")}</select>
-        <select class="tune-select" data-clean-filter="state"><option value="all">All states</option><option value="orphaned" ${State.cleanupFilters.state === "orphaned" ? "selected" : ""}>Orphaned only</option></select></div>
+        <select class="tune-select" data-clean-filter="state"><option value="all" ${State.cleanupFilters.state === "all" ? "selected" : ""}>All states</option><option value="orphaned" ${State.cleanupFilters.state === "orphaned" ? "selected" : ""}>Orphaned only</option></select></div>
       <div class="cleanup-toolbar"><button class="chip" data-action="select-assets">Select ${safe.length} matching safe</button><button class="chip" data-action="asset-clear">None</button><span class="faint">WSL Claude assets are visible but read-only.</span></div>
-      <div class="clean-list">${items.map((item) => { const key = `${item.source_id}␟${item.path}`; const on = State.assetSel.has(key); const locked = item.protected || !item.source_writable; return `<div class="clean-row ${on ? "sel" : ""} ${locked ? "readonly" : ""}" data-action="asset-row" data-key="${esc(key)}">${locked ? '<span class="chk-lock">🔒</span>' : `<input type="checkbox" class="chk" ${on ? "checked" : ""} tabindex="-1">`}<div class="cr-main"><div class="cr-title asset-kind">${esc(item.kind.replaceAll("_", " "))} ${item.orphaned ? badge("orphaned") : ""} ${sourceBadge(item)}</div><div class="cr-meta"><span>${esc(item.project_name)}</span><span>${item.file_count} files</span><span>${fmt.rel(item.mtime)}</span></div></div><div class="cr-nums"><span class="cr-size">${fmt.bytes(item.size_bytes)}</span></div></div>`; }).join("") || '<div class="faint" style="padding:14px">No assets match these filters.</div>'}</div>
+      <div class="clean-list">${items.map((item) => { const key = `${item.source_id}␟${item.path}`; const on = State.assetSel.has(key); const locked = item.protected || !item.source_writable; return `<div class="clean-row ${on ? "sel" : ""} ${locked ? "readonly" : ""}" data-action="asset-row" data-key="${esc(key)}">${locked ? '<span class="chk-lock">🔒</span>' : `<input type="checkbox" class="chk" ${on ? "checked" : ""} tabindex="-1">`}<div class="cr-main"><div class="cr-title asset-kind">${esc(item.kind.replaceAll("_", " "))} ${item.orphaned ? badge("orphaned") : ""} ${sourceBadge(item)}</div><div class="cr-meta"><span>${esc(item.project_name)}</span><span>${item.file_count} files</span><span>${fmt.rel(item.mtime)}</span></div></div><div class="cr-nums"><span class="cr-size">${fmt.bytes(item.size_bytes)}</span></div></div>`; }).join("") || '<div class="faint" style="padding:14px">No assets match these filters.</div>'}${allItems.length > items.length ? `<button class="btn" data-action="cleanup-more" style="justify-content:center">Show 300 more · ${allItems.length - items.length} remaining</button>` : ""}</div>
     </div>${selected.length ? `<div class="sel-bar"><div class="sb-info"><b>${selected.length}</b> groups · <b>${fmt.bytes(bytes)}</b> permanent reclaim</div><button class="btn sm" data-action="asset-clear">Clear</button><button class="btn sm primary danger" data-action="asset-delete">Delete selected assets</button></div>` : ""}</div>`;
 }
 
@@ -1536,9 +1583,12 @@ function selBar() {
 }
 
 async function loadCleanup() {
+  const request = ++State.requestSeq.cleanup;
   State.cleanup = null; State.assets = null; State.assetSel.clear(); State.cleanupLimit = 300; clearSel();
   renderDetail();
-  State.cleanup = await call("getProviderAllSessions", State.agent, sourceScope());
+  const cleanup = await call("getProviderAllSessions", State.agent, sourceScope());
+  if (request !== State.requestSeq.cleanup || State.view !== "cleanup") return;
+  State.cleanup = cleanup;
   renderDetail();
 }
 
@@ -1825,8 +1875,10 @@ function emptyState(ic, title, sub) {
 /* ---------- data loaders ---------- */
 
 async function loadOverview() {
+  const request = ++State.requestSeq.overview;
   const scope = sourceScope();
   const [o, g] = await Promise.all([call("getProviderOverview", State.agent, scope), call("getProviderGlobalStats", State.agent, scope)]);
+  if (request !== State.requestSeq.overview) return;
   if (o) { State.projects = o.projects || []; State.agentHome = o.home; State.claudeHome = o.claude_home || (State.agent === "claude" ? o.home : State.claudeHome); State.codexHome = o.codex_home || (State.agent === "codex" ? o.home : State.codexHome); }
   renderRail();
   if (g) { State.globalStats = g; if (State.view === "overview" && !State.projectId) renderDetail(); }
@@ -1876,15 +1928,19 @@ async function toggleSource(sourceId, enabled) {
 }
 
 async function selectProject(id, { keepSession = false } = {}) {
+  const request = ++State.requestSeq.project;
   State.projectId = id;
   if (!keepSession) {
     if (State.view === "session" && backend && backend.leaveSession) backend.leaveSession();
     State.sessionId = null; State.detail = null; State.transcript = null; State.selectMode = false; clearSel();
   }
   State.view = State.view === "memory" ? "memory" : "project";
+  State.sessionLimit = 150;
+  syncViewSwitch();
   const p = State.projects.find((x) => x.id === id);
   const provider = (p && p.provider) || (State.agent === "all" ? "claude" : State.agent);
   const r = await call("getProviderSessions", provider, id);
+  if (request !== State.requestSeq.project || State.projectId !== id) return;
   State.sessions = (r && r.sessions) || [];
   renderRail(); renderListPane(); renderDetail();
   if (State.view === "memory") loadMemory(id);
@@ -1895,6 +1951,7 @@ function detailSig(d) {
 }
 
 async function selectSession(sid) {
+  const request = ++State.requestSeq.session;
   State.sessionId = sid;
   State.view = "session";
   State.tab = "analytics"; // analytics-first
@@ -1902,6 +1959,7 @@ async function selectSession(sid) {
   const s = State.sessions.find((x) => x.session_id === sid) || {};
   const provider = s.provider || currentProvider();
   const d = await call("getProviderSessionDetail", provider, State.projectId, sid);
+  if (request !== State.requestSeq.session || State.sessionId !== sid) return;
   State.detail = d || {};
   State.transcript = { events: d && d.events || [], start: d && d.events_start || 0, total: d && d.total_events || 0 };
   if (State.transcript.events.length > MAX_BROWSER_TRANSCRIPT_EVENTS) {
@@ -1991,6 +2049,7 @@ function enhanceInteractive(root = document) {
 }
 
 function updateChrome() {
+  syncViewSwitch();
   const scope = document.getElementById("status-scope");
   const summary = document.getElementById("status-summary");
   const project = projById(State.projectId);
@@ -2011,10 +2070,14 @@ function currentProject() {
 
 async function launchClaudeSession(sessionId = "", path = "") {
   const project = currentProject();
-  const cwd = path || (project && project.path) || "";
+  const fallback = !path && !project
+    ? State.projects.find((item) => item.exists && (State.agent === "all" || item.provider === State.agent))
+    : null;
+  const targetProject = project || fallback;
+  const cwd = path || (targetProject && targetProject.path) || "";
   if (!cwd) return void toast("Choose a project with an available folder first", "err");
-  const provider = (State.sessions.find((x) => x.session_id === sessionId) || project || {}).provider || currentProvider();
-  const sourceId = (State.sessions.find((x) => x.session_id === sessionId) || project || {}).source_id || State.source;
+  const provider = (State.sessions.find((x) => x.session_id === sessionId) || targetProject || {}).provider || currentProvider();
+  const sourceId = (State.sessions.find((x) => x.session_id === sessionId) || targetProject || {}).source_id || State.source;
   const result = await call("launchAgent", provider, sourceId, cwd, sessionId || "", "resume");
   if (result && result.ok) {
     const target = result.target === "desktop" ? " in the Codex desktop app" : (sessionId ? " in a terminal" : "");
@@ -2037,13 +2100,24 @@ async function switchAgent(provider, nextView = "") {
 }
 
 function syncAgentSwitch() {
-  document.querySelectorAll("[data-agent]").forEach((button) => {
-    if (!button.closest("#agent-switch")) return;
-    const active = button.dataset.agent === State.agent;
-    button.classList.toggle("active", active); button.setAttribute("aria-pressed", active ? "true" : "false");
-  });
+  const select = document.getElementById("agent-switch");
+  if (select) select.value = State.agent;
   const footer = document.getElementById("live-label");
   if (footer && footer.textContent !== "preview") footer.textContent = State.agent === "all" ? "both" : State.agent;
+}
+
+function syncViewSwitch() {
+  const select = document.getElementById("view-switch");
+  if (!select) return;
+  select.value = State.projectId ? "sessions" : (State.view === "search" ? "overview" : State.view);
+}
+
+function setRailCollapsed(collapsed) {
+  const app = document.getElementById("app");
+  app.classList.toggle("rail-collapsed", collapsed);
+  localStorage.setItem("asm.railCollapsed", collapsed ? "1" : "0");
+  const button = document.getElementById("rail-toggle");
+  if (button) button.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
 async function navigateTo(view) {
@@ -2053,6 +2127,11 @@ async function navigateTo(view) {
     State.detail = null;
   }
   State.view = view; State.projectId = null; State.sessionId = null;
+  State.sessions = [];
+  State.requestSeq.project += 1;
+  State.requestSeq.session += 1;
+  State.requestSeq.search += 1;
+  State.requestSeq.cleanup += 1;
   State.selectMode = false; clearSel();
   renderRail(); renderListPane();
   if (view === "settings") await loadSettings();
@@ -2061,6 +2140,7 @@ async function navigateTo(view) {
   else if (view === "tune") await loadTune();
   else if (view === "overview" && State.overviewDirty) { await loadOverview(); State.overviewDirty = false; }
   else renderDetail();
+  syncViewSwitch();
 }
 
 function commandEntries(mode = "all") {
@@ -2207,6 +2287,7 @@ document.addEventListener("click", async (ev) => {
     case "session": return void selectSession(t.dataset.id);
     case "memory": { State.view = "memory"; renderListPane(); loadMemory(State.projectId); break; }
     case "tab": { State.tab = t.dataset.tab; document.getElementById("tab-body").innerHTML = sessionTabBody(); document.querySelectorAll(".tab").forEach((x) => { const active = x.dataset.tab === State.tab; x.classList.toggle("active", active); x.setAttribute("aria-selected", active ? "true" : "false"); }); enhanceInteractive(document.getElementById("tab-body")); break; }
+    case "sessions-more": { State.sessionLimit += 150; keepScroll("list-pane", renderListPane); break; }
     case "toggle-noise": { State.showNoise = !State.showNoise; document.getElementById("tab-body").innerHTML = sessionTabBody(); break; }
     case "open-editor": { const r = await call("openInEditor", path); toast(r && r.ok ? "Opened in " + (r.editor || "editor") : "Could not open", r && r.ok ? "ok" : "err"); break; }
     case "open-folder": { await call("openPath", path); break; }
@@ -2233,7 +2314,9 @@ document.addEventListener("click", async (ev) => {
     }
     case "cleanup-view": return void applyCleanupView(t.dataset.view);
     case "cleanup-mode": {
+      State.cleanupFilterSets[State.cleanupMode] = State.cleanupFilters;
       State.cleanupMode = t.dataset.mode;
+      State.cleanupFilters = State.cleanupFilterSets[State.cleanupMode];
       if (State.cleanupMode === "assets" && !State.assets) { renderDetail(); State.assets = await call("getStorageAssets", sourceScope()); }
       renderDetail(); break;
     }
@@ -2407,11 +2490,24 @@ document.addEventListener("change", async (ev) => {
 
 /* nav items */
 document.querySelectorAll(".nav-item").forEach((n) => n.addEventListener("click", () => navigateTo(n.dataset.view)));
-document.getElementById("agent-switch").addEventListener("click", (ev) => {
-  const button = ev.target.closest("[data-agent]");
-  if (button) switchAgent(button.dataset.agent);
-});
+document.getElementById("agent-switch").addEventListener("change", (ev) => switchAgent(ev.target.value));
 document.getElementById("source-switch").addEventListener("change", (ev) => switchSource(ev.target.value));
+document.getElementById("view-switch").addEventListener("change", async (ev) => {
+  const view = ev.target.value;
+  if (view === "sessions") {
+    if (State.projectId) return syncViewSwitch();
+    if (State.projects.length) return selectProject(State.projects[0].id);
+    return syncViewSwitch();
+  }
+  await navigateTo(view);
+});
+document.getElementById("project-switch").addEventListener("change", async (ev) => {
+  if (ev.target.value) await selectProject(ev.target.value);
+  else await navigateTo("overview");
+});
+document.getElementById("rail-toggle").addEventListener("click", () => {
+  setRailCollapsed(!document.getElementById("app").classList.contains("rail-collapsed"));
+});
 
 async function loadMonitor() {
   renderDetail();
@@ -2436,9 +2532,21 @@ document.getElementById("shortcut-backdrop").addEventListener("click", (e) => { 
 document.getElementById("win-min").addEventListener("click", () => backend && backend.windowMinimize());
 document.getElementById("win-close").addEventListener("click", () => backend && backend.windowClose());
 
+let searchRenderFrame = 0;
 document.getElementById("search").addEventListener("input", (e) => {
   State.search = e.target.value;
-  renderRail(); renderListPane();
+  cancelAnimationFrame(searchRenderFrame);
+  searchRenderFrame = requestAnimationFrame(() => { renderRail(); renderListPane(); });
+});
+
+document.addEventListener("change", (ev) => {
+  if (ev.target.matches("[data-session-filter='status']")) {
+    State.sessionFilter = ev.target.value; State.sessionLimit = 150;
+    localStorage.setItem("asm.sessionFilter", State.sessionFilter); renderListPane();
+  } else if (ev.target.matches("[data-session-sort]")) {
+    State.sessionSort = ev.target.value; State.sessionLimit = 150;
+    localStorage.setItem("asm.sessionSort", State.sessionSort); renderListPane();
+  }
 });
 
 document.getElementById("search").addEventListener("keydown", (e) => {
@@ -2454,9 +2562,16 @@ document.addEventListener("input", (ev) => {
   const clean = ev.target.closest("[data-clean-filter='query']");
   if (!clean) return;
   State.cleanupFilters.query = clean.value;
-  renderDetail();
-  const next = document.querySelector("[data-clean-filter='query']");
-  if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+  clearTimeout(State._cleanupSearchTimer);
+  State._cleanupSearchTimer = setTimeout(() => {
+    if (State.view !== "cleanup") return;
+    const pane = document.getElementById("detail-pane");
+    const top = pane ? pane.scrollTop : 0;
+    renderDetail();
+    if (pane) pane.scrollTop = top;
+    const next = document.querySelector("[data-clean-filter='query']");
+    if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+  }, 120);
 });
 
 document.addEventListener("keydown", async (e) => {
@@ -2507,8 +2622,7 @@ document.addEventListener("keydown", async (e) => {
     e.preventDefault(); await navigateTo(["overview", "monitor", "cleanup", "tune"][Number(e.key) - 1]); return;
   }
   if (ctrl && e.key.toLowerCase() === "b") {
-    e.preventDefault(); document.getElementById("app").classList.toggle("rail-collapsed");
-    localStorage.setItem("asm.railCollapsed", document.getElementById("app").classList.contains("rail-collapsed") ? "1" : "0"); return;
+    e.preventDefault(); setRailCollapsed(!document.getElementById("app").classList.contains("rail-collapsed")); return;
   }
   if (ctrl && e.key === "Tab" && State.view === "session") {
     e.preventDefault();
@@ -2721,8 +2835,9 @@ async function runLiveRefresh() {
 
 function boot() {
   initPaneResizers();
-  if (storedSetting("railCollapsed", "0") === "1") document.getElementById("app").classList.add("rail-collapsed");
+  setRailCollapsed(storedSetting("railCollapsed", "0") === "1");
   syncAgentSwitch();
+  syncViewSwitch();
   if (typeof QWebChannel === "undefined" || !window.qt || !window.qt.webChannelTransport) {
     bootPreview();
     return;

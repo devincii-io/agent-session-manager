@@ -62,6 +62,20 @@ class FrontendConventionTests(unittest.TestCase):
         self.assertIn('storage: "asm.listWidth"', js)
         self.assertIn("MIN_DETAIL_WIDTH = 420", js)
 
+    def test_navigation_and_long_session_lists_remain_accessible(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "web" / "index.html").read_text("utf-8")
+        js = (root / "web" / "app.js").read_text("utf-8")
+        self.assertIn('id="rail-toggle"', html)
+        self.assertIn('id="view-switch"', html)
+        self.assertIn('id="project-switch"', html)
+        self.assertIn('id="agent-switch"', html)
+        self.assertIn("sessionLimit: 150", js)
+        self.assertIn('data-action="sessions-more"', js)
+        self.assertIn("request !== State.requestSeq.session", js)
+        self.assertIn("request !== State.requestSeq.project", js)
+        self.assertIn("cleanupFilterSets", js)
+
 
 if __name__ == "__main__":
     unittest.main()

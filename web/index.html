@@ -11,18 +11,37 @@
 <body>
   <div id="app">
     <header class="topbar" role="banner">
+      <button id="rail-toggle" class="icon-btn rail-toggle" type="button" title="Toggle project sidebar (Ctrl+B)" aria-label="Toggle project sidebar" aria-expanded="true">&#9776;</button>
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">ASM</span>
         <span class="brand-name">Session Manager</span>
       </div>
-      <div id="agent-switch" class="agent-switch" role="group" aria-label="Session source">
-        <button type="button" data-agent="all">All</button>
-        <button type="button" data-agent="claude">Claude</button>
-        <button type="button" data-agent="codex">Codex</button>
-      </div>
-      <label class="source-picker" title="Environment to scan. WSL sources are opt-in for faster refreshes.">
-        <span>Environment</span>
+      <label class="top-select view-picker" title="Choose a workspace view">
+        <span>View</span>
+        <select id="view-switch" aria-label="View">
+          <option value="overview">Overview</option>
+          <option value="sessions">Sessions</option>
+          <option value="monitor">Monitor</option>
+          <option value="cleanup">Cleanup</option>
+          <option value="tune">Instructions</option>
+          <option value="settings">Settings</option>
+        </select>
+      </label>
+      <label class="top-select agent-picker" title="Filter sessions by agent">
+        <span>Agent</span>
+        <select id="agent-switch" aria-label="Agent">
+          <option value="all">All agents</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+      </label>
+      <label class="top-select source-picker" title="Environment to scan. WSL sources are opt-in for faster refreshes.">
+        <span>Env</span>
         <select id="source-switch" aria-label="Environment"><option value="windows">Windows</option></select>
+      </label>
+      <label class="top-select compact-project-picker" title="Jump to a project">
+        <span>Project</span>
+        <select id="project-switch" aria-label="Project"><option value="">All projects</option></select>
       </label>
       <div class="search-wrap">
         <span class="search-icon" aria-hidden="true">/</span>
@@ -46,6 +65,7 @@
 
     <div class="body">
       <nav class="rail" aria-label="Primary navigation">
+        <div class="rail-group-label">Workspace</div>
         <div class="nav-group">
           <button class="nav-item active" data-view="overview" title="Overview (Ctrl+1)">
             <span class="nav-ic">01</span><span>Overview</span><kbd>Ctrl 1</kbd>
@@ -53,6 +73,9 @@
           <button class="nav-item" data-view="monitor" title="Monitor (Ctrl+2)">
             <span class="nav-ic">02</span><span>Monitor</span><kbd>Ctrl 2</kbd>
           </button>
+        </div>
+        <div class="rail-group-label">Manage</div>
+        <div class="nav-group">
           <button class="nav-item" data-view="cleanup" title="Cleanup (Ctrl+3)">
             <span class="nav-ic">03</span><span>Cleanup</span><kbd>Ctrl 3</kbd>
           </button>
@@ -90,7 +113,7 @@
       <span class="status-spacer"></span>
       <button id="update-pill" class="update-pill" data-action="goto-update" hidden>Update available</button>
       <button data-action="show-shortcuts">Keyboard shortcuts</button>
-      <span id="app-version">v2.0.2</span>
+      <span id="app-version">v2.0.3</span>
     </footer>
   </div>
 
