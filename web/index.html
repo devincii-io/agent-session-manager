@@ -11,7 +11,6 @@
 <body>
   <div id="app">
     <header class="topbar" role="banner">
-      <button id="rail-toggle" class="icon-btn rail-toggle" type="button" title="Toggle project sidebar (Ctrl+B)" aria-label="Toggle project sidebar" aria-expanded="true">&#9776;</button>
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">ASM</span>
         <span class="brand-name">Session Manager</span>
@@ -39,18 +38,23 @@
         <span>Env</span>
         <select id="source-switch" aria-label="Environment"><option value="windows">Windows</option></select>
       </label>
-      <label class="top-select compact-project-picker" title="Jump to a project">
+      <label class="top-select project-picker" title="Filter by project or open its sessions">
         <span>Project</span>
         <select id="project-switch" aria-label="Project"><option value="">All projects</option></select>
       </label>
+      <label class="top-select session-picker" title="Choose a session; type in Search to filter this list">
+        <span>Session</span>
+        <select id="session-switch" aria-label="Session" disabled><option value="">Choose a project</option></select>
+      </label>
       <div class="search-wrap">
         <span class="search-icon" aria-hidden="true">/</span>
-        <input id="search" type="text" placeholder="Filter projects and sessions" aria-label="Filter projects and sessions" autocomplete="off" spellcheck="false" />
+        <input id="search" type="text" placeholder="Search projects or sessions · Enter searches all history" aria-label="Search projects or sessions" autocomplete="off" spellcheck="false" />
         <kbd class="input-hint">Ctrl F</kbd>
       </div>
       <button id="command-trigger" class="command-trigger" type="button" title="Open command launcher (Ctrl+K)">
         <span>Commands</span><kbd>Ctrl K</kbd>
       </button>
+      <button class="top-new-session" type="button" data-action="launch-new" title="Start a new session in the selected or most recent project (Ctrl+N)">+ New</button>
       <button id="help-trigger" class="icon-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
       <div class="topbar-right">
         <div id="live-dot" class="live-dot" title="Watching local agent session data for changes">
@@ -64,41 +68,6 @@
     </header>
 
     <div class="body">
-      <nav class="rail" aria-label="Primary navigation">
-        <div class="rail-group-label">Workspace</div>
-        <div class="nav-group">
-          <button class="nav-item active" data-view="overview" title="Overview (Ctrl+1)">
-            <span class="nav-ic">01</span><span>Overview</span><kbd>Ctrl 1</kbd>
-          </button>
-          <button class="nav-item" data-view="monitor" title="Monitor (Ctrl+2)">
-            <span class="nav-ic">02</span><span>Monitor</span><kbd>Ctrl 2</kbd>
-          </button>
-        </div>
-        <div class="rail-group-label">Manage</div>
-        <div class="nav-group">
-          <button class="nav-item" data-view="cleanup" title="Cleanup (Ctrl+3)">
-            <span class="nav-ic">03</span><span>Cleanup</span><kbd>Ctrl 3</kbd>
-          </button>
-          <button class="nav-item" data-view="tune" title="Agent instructions and memory (Ctrl+4)">
-            <span class="nav-ic">04</span><span>Instructions</span><kbd>Ctrl 4</kbd>
-          </button>
-          <button class="nav-item" data-view="settings" title="Settings (Ctrl+,)">
-            <span class="nav-ic">&#9881;</span><span>Settings</span><kbd>Ctrl ,</kbd>
-          </button>
-        </div>
-        <div class="rail-section-head"><span>Projects</span><span id="project-count" class="count"></span></div>
-        <div id="project-list" class="project-list"></div>
-        <div class="rail-footer">
-          <button class="rail-command" data-action="launch-new" title="Start the selected agent in the current project (Ctrl+N)">
-            <span>+ New session</span><kbd>Ctrl N</kbd>
-          </button>
-        </div>
-      </nav>
-
-      <div id="rail-resizer" class="pane-resizer rail-resizer" data-pane="rail" role="separator"
-        aria-label="Resize project sidebar" aria-orientation="vertical" aria-valuemin="160"
-        aria-valuemax="420" aria-valuenow="218" tabindex="0"
-        title="Drag to resize project sidebar · Double-click to reset"></div>
       <section id="list-pane" class="list-pane" aria-label="Sessions"></section>
       <div id="list-resizer" class="pane-resizer list-resizer" data-pane="list" role="separator"
         aria-label="Resize session list" aria-orientation="vertical" aria-valuemin="240"
@@ -113,7 +82,7 @@
       <span class="status-spacer"></span>
       <button id="update-pill" class="update-pill" data-action="goto-update" hidden>Update available</button>
       <button data-action="show-shortcuts">Keyboard shortcuts</button>
-      <span id="app-version">v2.0.3</span>
+      <span id="app-version">v2.0.4</span>
     </footer>
   </div>
 

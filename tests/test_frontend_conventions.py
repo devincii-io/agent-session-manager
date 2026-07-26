@@ -54,11 +54,11 @@ class FrontendConventionTests(unittest.TestCase):
         js = (root / "web" / "app.js").read_text("utf-8")
         self.assertRegex(css, r"\.detail-inner\s*\{[^}]*max-width\s*:\s*none\s*;")
         self.assertIn("detail-inner overview-layout", js)
-        self.assertEqual(html.count('role="separator"'), 2)
-        self.assertIn("--rail-width", css)
+        self.assertEqual(html.count('role="separator"'), 1)
+        self.assertNotIn('class="rail"', html)
+        self.assertNotIn("--rail-width", css)
         self.assertIn("--list-width", css)
         self.assertIn("function initPaneResizers()", js)
-        self.assertIn('storage: "asm.railWidth"', js)
         self.assertIn('storage: "asm.listWidth"', js)
         self.assertIn("MIN_DETAIL_WIDTH = 420", js)
 
@@ -66,15 +66,18 @@ class FrontendConventionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         html = (root / "web" / "index.html").read_text("utf-8")
         js = (root / "web" / "app.js").read_text("utf-8")
-        self.assertIn('id="rail-toggle"', html)
+        self.assertNotIn('id="rail-toggle"', html)
+        self.assertIn("document.querySelector('#view-switch')", (root / "asm" / "app.py").read_text("utf-8"))
         self.assertIn('id="view-switch"', html)
         self.assertIn('id="project-switch"', html)
+        self.assertIn('id="session-switch"', html)
         self.assertIn('id="agent-switch"', html)
         self.assertIn("sessionLimit: 150", js)
         self.assertIn('data-action="sessions-more"', js)
         self.assertIn("request !== State.requestSeq.session", js)
         self.assertIn("request !== State.requestSeq.project", js)
         self.assertIn("cleanupFilterSets", js)
+        self.assertIn("function renderSessionSwitch()", js)
 
 
 if __name__ == "__main__":

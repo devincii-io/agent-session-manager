@@ -47,7 +47,7 @@ const State = {
   overviewDirty: false,
   liveRefreshInFlight: false,
   liveRefreshQueued: false,
-  appVersion: "2.0.3",
+  appVersion: "2.0.4",
   update: null,
   updateBusy: "",
   updateRequested: false,
@@ -64,7 +64,6 @@ const State = {
 const MAX_BROWSER_TRANSCRIPT_EVENTS = 1200;
 
 const PANE_SIZES = {
-  rail: { css: "--rail-width", storage: "asm.railWidth", default: 218, min: 160, max: 420 },
   list: { css: "--list-width", storage: "asm.listWidth", default: 326, min: 240, max: 620 },
 };
 const MIN_DETAIL_WIDTH = 420;
@@ -81,15 +80,10 @@ function savedPaneWidth(name) {
 function paneBounds(name) {
   const cfg = PANE_SIZES[name];
   const compactDesktop = window.innerWidth <= 1280;
-  const responsiveMin = compactDesktop ? (name === "rail" ? 168 : 240) : cfg.min;
-  const responsiveMax = compactDesktop ? (name === "rail" ? 190 : 286) : cfg.max;
+  const responsiveMin = compactDesktop ? 240 : cfg.min;
+  const responsiveMax = compactDesktop ? 320 : cfg.max;
   const body = document.querySelector(".body");
-  const rail = document.querySelector(".rail");
-  const list = document.querySelector(".list-pane");
-  const otherWidth = name === "rail"
-    ? (list && getComputedStyle(list).display !== "none" ? list.getBoundingClientRect().width : 0)
-    : (rail && getComputedStyle(rail).display !== "none" ? rail.getBoundingClientRect().width : 0);
-  const available = body ? body.clientWidth - otherWidth - MIN_DETAIL_WIDTH - 12 : responsiveMax;
+  const available = body ? body.clientWidth - MIN_DETAIL_WIDTH - 6 : responsiveMax;
   return { min: responsiveMin, max: Math.max(responsiveMin, Math.min(responsiveMax, available)) };
 }
 
@@ -125,7 +119,7 @@ function initPaneResizers() {
     let drag = null;
     separator.addEventListener("mousedown", (event) => {
       if (event.button !== 0 || window.innerWidth <= 1080) return;
-      const pane = document.querySelector(name === "rail" ? ".rail" : ".list-pane");
+      const pane = document.querySelector(".list-pane");
       drag = { startX: event.clientX, startWidth: pane.getBoundingClientRect().width };
       separator.dataset.active = "true";
       document.body.classList.add("pane-resizing");
@@ -137,7 +131,7 @@ function initPaneResizers() {
     });
     const finish = () => {
       if (!drag) return;
-      const pane = document.querySelector(name === "rail" ? ".rail" : ".list-pane");
+      const pane = document.querySelector(".list-pane");
       setPaneWidth(name, pane.getBoundingClientRect().width, true);
       drag = null;
       delete separator.dataset.active;
@@ -150,7 +144,7 @@ function initPaneResizers() {
       if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
       event.preventDefault();
       if (event.key === "Home") return resetPaneWidth(name);
-      const pane = document.querySelector(name === "rail" ? ".rail" : ".list-pane");
+      const pane = document.querySelector(".list-pane");
       const direction = event.key === "ArrowRight" ? 1 : -1;
       setPaneWidth(name, pane.getBoundingClientRect().width + direction * (event.shiftKey ? 32 : 12), true);
     });
@@ -334,31 +328,10 @@ function sparkline(points, color = "#d97757", w = 640, h = 70) {
 
 function badge(text, cls = "") { return `<span class="badge ${cls}">${esc(text)}</span>`; }
 
-/* ---------- rail ---------- */
+/* ---------- top-bar project scope ---------- */
 
-function renderRail() {
-  document.querySelectorAll(".nav-item").forEach((n) =>
-    n.classList.toggle("active", n.dataset.view === State.view && !State.projectId ||
-      (State.view === "settings" && n.dataset.view === "settings") ||
-      (State.view === "monitor" && n.dataset.view === "monitor") ||
-      (State.view === "overview" && n.dataset.view === "overview" && !State.projectId)));
-
-  const q = State.search.toLowerCase();
-  const list = State.projects.filter((p) =>
-    !q || p.name.toLowerCase().includes(q) || (p.path || "").toLowerCase().includes(q));
-  document.getElementById("project-list").innerHTML = list.map((p) => `
-    <div class="project-item ${p.id === State.projectId ? "active" : ""}" data-action="project" data-id="${esc(p.id)}">
-      <div class="p-name">${p.active_count ? '<span class="dot-active"></span>' : ""}${esc(p.name)} ${providerBadge(p.provider)} ${sourceBadge(p)}</div>
-      <div class="p-meta">
-        <span>${p.session_count} sess</span>
-        ${p.provider === "codex" ? "" : `<span class="p-cost">${fmt.cost(p.total_cost)}</span>`}
-        <span>${fmt.tokens(p.total_tokens)}</span>
-      </div>
-    </div>`).join("") || `<div class="faint" style="padding:10px;font-size:12px">No projects found.</div>`;
-  const count = document.getElementById("project-count");
-  if (count) count.textContent = String(list.length);
+function renderTopbarFilters() {
   renderProjectSwitch(State.projects);
-  enhanceInteractive(document.getElementById("project-list"));
   updateChrome();
 }
 
@@ -367,7 +340,7 @@ function renderProjectSwitch(projects = State.projects) {
   if (!select) return;
   const previous = State.projectId || "";
   select.innerHTML = `<option value="">All projects</option>${projects.map((p) =>
-    `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(agentInfo(p.provider).short)}</option>`).join("")}`;
+    `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(agentInfo(p.provider).short)} · ${p.session_count || 0} sessions</option>`).join("")}`;
   select.value = projects.some((p) => p.id === previous) ? previous : "";
 }
 
@@ -396,8 +369,8 @@ function sourceBadge(item) {
 function renderListPane() {
   const el = document.getElementById("list-pane");
   const separator = document.getElementById("list-resizer");
-  // The rail already lists projects — the middle pane only appears inside a
-  // project (sessions + memory) so information is never shown twice.
+  // The top bar owns project selection. The middle pane appears only inside a
+  // project and contains its sessions plus memory entry.
   if (State.projectId) {
     el.style.display = "flex";
     el.innerHTML = projectListPane();
@@ -407,7 +380,25 @@ function renderListPane() {
   }
   if (separator) separator.hidden = !State.projectId;
   enhanceInteractive(el);
+  renderSessionSwitch();
   updateChrome();
+}
+
+function renderSessionSwitch() {
+  const select = document.getElementById("session-switch");
+  if (!select) return;
+  if (!State.projectId) {
+    select.disabled = true;
+    select.innerHTML = '<option value="">Choose a project</option>';
+    return;
+  }
+  const matches = State.sessions.filter(sessionMatchesSearch).slice(0, 300);
+  select.disabled = false;
+  select.innerHTML = `<option value="">All ${State.sessions.length} sessions</option>${matches.map((session) => {
+    const title = session.title || session.first_prompt || "Untitled session";
+    return `<option value="${esc(session.session_id)}">${session.active ? "● " : ""}${esc(title)} · ${fmt.rel(session.mtime)}</option>`;
+  }).join("")}`;
+  select.value = matches.some((session) => session.session_id === State.sessionId) ? State.sessionId : "";
 }
 
 function projectListPane() {
@@ -1880,7 +1871,7 @@ async function loadOverview() {
   const [o, g] = await Promise.all([call("getProviderOverview", State.agent, scope), call("getProviderGlobalStats", State.agent, scope)]);
   if (request !== State.requestSeq.overview) return;
   if (o) { State.projects = o.projects || []; State.agentHome = o.home; State.claudeHome = o.claude_home || (State.agent === "claude" ? o.home : State.claudeHome); State.codexHome = o.codex_home || (State.agent === "codex" ? o.home : State.codexHome); }
-  renderRail();
+  renderTopbarFilters();
   if (g) { State.globalStats = g; if (State.view === "overview" && !State.projectId) renderDetail(); }
 }
 
@@ -1942,7 +1933,7 @@ async function selectProject(id, { keepSession = false } = {}) {
   const r = await call("getProviderSessions", provider, id);
   if (request !== State.requestSeq.project || State.projectId !== id) return;
   State.sessions = (r && r.sessions) || [];
-  renderRail(); renderListPane(); renderDetail();
+  renderTopbarFilters(); renderListPane(); renderDetail();
   if (State.view === "memory") loadMemory(id);
 }
 
@@ -2027,7 +2018,6 @@ const SHORTCUTS = [
   ["Resume selected session", "Ctrl Enter"],
   ["Overview / Monitor / Cleanup / Instructions", "Ctrl 1…4"],
   ["Settings", "Ctrl ,"],
-  ["Toggle project rail", "Ctrl B"],
   ["Move between panes", "F6 / Shift F6"],
   ["Cycle session tabs", "Ctrl Tab"],
   ["Save open editor", "Ctrl S"],
@@ -2112,14 +2102,6 @@ function syncViewSwitch() {
   select.value = State.projectId ? "sessions" : (State.view === "search" ? "overview" : State.view);
 }
 
-function setRailCollapsed(collapsed) {
-  const app = document.getElementById("app");
-  app.classList.toggle("rail-collapsed", collapsed);
-  localStorage.setItem("asm.railCollapsed", collapsed ? "1" : "0");
-  const button = document.getElementById("rail-toggle");
-  if (button) button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-}
-
 async function navigateTo(view) {
   if (State.view === "session" && view !== "session") {
     if (backend && backend.leaveSession) backend.leaveSession();
@@ -2133,7 +2115,7 @@ async function navigateTo(view) {
   State.requestSeq.search += 1;
   State.requestSeq.cleanup += 1;
   State.selectMode = false; clearSel();
-  renderRail(); renderListPane();
+  renderTopbarFilters(); renderListPane();
   if (view === "settings") await loadSettings();
   else if (view === "monitor") await loadMonitor();
   else if (view === "cleanup") await loadCleanup();
@@ -2233,7 +2215,7 @@ async function refreshAll() {
 function focusSearch(global = false) {
   const input = document.getElementById("search");
   input.dataset.scope = global ? "global" : "filter";
-  input.placeholder = global ? "Search all sessions and prompts · Enter" : "Filter projects and sessions";
+  input.placeholder = global ? "Search all sessions and prompts · Enter" : "Search projects or sessions · Enter searches all history";
   input.focus(); input.select();
 }
 
@@ -2489,7 +2471,6 @@ document.addEventListener("change", async (ev) => {
 });
 
 /* nav items */
-document.querySelectorAll(".nav-item").forEach((n) => n.addEventListener("click", () => navigateTo(n.dataset.view)));
 document.getElementById("agent-switch").addEventListener("change", (ev) => switchAgent(ev.target.value));
 document.getElementById("source-switch").addEventListener("change", (ev) => switchSource(ev.target.value));
 document.getElementById("view-switch").addEventListener("change", async (ev) => {
@@ -2505,8 +2486,9 @@ document.getElementById("project-switch").addEventListener("change", async (ev) 
   if (ev.target.value) await selectProject(ev.target.value);
   else await navigateTo("overview");
 });
-document.getElementById("rail-toggle").addEventListener("click", () => {
-  setRailCollapsed(!document.getElementById("app").classList.contains("rail-collapsed"));
+document.getElementById("session-switch").addEventListener("change", async (ev) => {
+  if (ev.target.value) await selectSession(ev.target.value);
+  else if (State.projectId) await selectProject(State.projectId);
 });
 
 async function loadMonitor() {
@@ -2536,7 +2518,7 @@ let searchRenderFrame = 0;
 document.getElementById("search").addEventListener("input", (e) => {
   State.search = e.target.value;
   cancelAnimationFrame(searchRenderFrame);
-  searchRenderFrame = requestAnimationFrame(() => { renderRail(); renderListPane(); });
+  searchRenderFrame = requestAnimationFrame(() => { renderTopbarFilters(); renderListPane(); });
 });
 
 document.addEventListener("change", (ev) => {
@@ -2555,7 +2537,7 @@ document.getElementById("search").addEventListener("keydown", (e) => {
   else if (e.key === "Escape") {
     e.target.value = ""; State.search = "";
     if (State.view === "search") { State.view = State.projectId ? "project" : "overview"; }
-    renderRail(); renderListPane(); renderDetail();
+    renderTopbarFilters(); renderListPane(); renderDetail();
   }
 });
 document.addEventListener("input", (ev) => {
@@ -2621,9 +2603,6 @@ document.addEventListener("keydown", async (e) => {
   if (ctrl && ["1", "2", "3", "4"].includes(e.key)) {
     e.preventDefault(); await navigateTo(["overview", "monitor", "cleanup", "tune"][Number(e.key) - 1]); return;
   }
-  if (ctrl && e.key.toLowerCase() === "b") {
-    e.preventDefault(); setRailCollapsed(!document.getElementById("app").classList.contains("rail-collapsed")); return;
-  }
   if (ctrl && e.key === "Tab" && State.view === "session") {
     e.preventDefault();
     const tabs = [...document.querySelectorAll(".tab")];
@@ -2633,7 +2612,7 @@ document.addEventListener("keydown", async (e) => {
   }
   if (e.key === "F6") {
     e.preventDefault();
-    const panes = [...document.querySelectorAll(".rail, .list-pane, .detail-pane")].filter((x) => getComputedStyle(x).display !== "none");
+    const panes = [...document.querySelectorAll(".list-pane, .detail-pane")].filter((x) => getComputedStyle(x).display !== "none");
     panes.forEach((x) => { if (!x.hasAttribute("tabindex")) x.tabIndex = -1; });
     let i = panes.findIndex((x) => x === document.activeElement || x.contains(document.activeElement));
     i = (i + (e.shiftKey ? -1 : 1) + panes.length) % panes.length;
@@ -2835,7 +2814,6 @@ async function runLiveRefresh() {
 
 function boot() {
   initPaneResizers();
-  setRailCollapsed(storedSetting("railCollapsed", "0") === "1");
   syncAgentSwitch();
   syncViewSwitch();
   if (typeof QWebChannel === "undefined" || !window.qt || !window.qt.webChannelTransport) {
@@ -2878,7 +2856,7 @@ function bootPreview() {
     tool_counts: { Read: 402, Edit: 238, Bash: 221, Search: 147, Agent: 41 },
     sessions_by_day: Array.from({ length: 14 }, (_, i) => [`2026-07-${String(i + 8).padStart(2, "0")}`, [1, 3, 2, 4, 2, 5, 3][i % 7]]),
   };
-  renderRail(); renderListPane(); renderDetail();
+  renderTopbarFilters(); renderListPane(); renderDetail();
 }
 
 if (document.readyState === "loading") window.addEventListener("load", boot);

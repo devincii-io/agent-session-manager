@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.4] — 2026-07-26
+
+### Changed
+- The permanent sidebar has been removed. View, agent, environment, and project
+  selection now live in one top-bar control plane without duplicate navigation.
+- Overview and management screens use the full window; selecting a project opens
+  only its contextual session pane and detail workspace.
+- New Session is directly available in the top bar and uses the selected project
+  or the most recent available project.
+- Sessions have their own top-bar picker; Search filters both the session picker
+  and session pane, while Enter searches the complete history.
+
+### Fixed
+- Compact and wide layouts now share the same project navigation instead of
+  switching between hidden, icon-only, and duplicated sidebar variants.
+- The packaged render self-test validates the top-bar navigation contract.
+
 ## [2.0.3] — 2026-07-26
 
 ### Changed

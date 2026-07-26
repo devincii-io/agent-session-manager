@@ -151,7 +151,7 @@ class MainWindow(QMainWindow):
                 QCoreApplication.exit(1)
                 return
             self._view.page().runJavaScript(
-                "(typeof State!=='undefined' && document.querySelector('.nav-item')) ? 'RENDER_OK' : 'RENDER_FAIL'",
+                "(typeof State!=='undefined' && document.querySelector('#view-switch') && document.querySelector('#project-switch') && document.querySelector('#session-switch') && document.querySelector('.detail-pane')) ? 'RENDER_OK' : 'RENDER_FAIL'",
                 lambda r: (print("SELFTEST:", r), QCoreApplication.exit(0 if r == "RENDER_OK" else 1)),
             )
 

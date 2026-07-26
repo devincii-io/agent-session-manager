@@ -32,7 +32,6 @@
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
-  --rail-width: 218px;
   --list-width: 326px;
 }
 
@@ -108,45 +107,6 @@ body {
 /* ---------- Body layout ---------- */
 .body { flex: 1; display: flex; min-width: 0; min-height: 0; }
 
-/* ---------- Rail ---------- */
-.rail {
-  width: var(--rail-width); flex-shrink: 0;
-  background: #1c1a16;
-  border-right: 1px solid var(--border);
-  display: flex; flex-direction: column;
-  overflow-y: auto;
-  padding: 10px 8px;
-}
-.nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
-.rail-group-label {
-  padding: 7px 9px 4px; color: var(--text-faint); font: 600 9px var(--mono);
-  letter-spacing: .8px; text-transform: uppercase;
-}
-.nav-item {
-  display: flex; align-items: center; gap: 10px;
-  background: transparent; border: none; color: var(--text-dim);
-  padding: 8px 11px; border-radius: 8px; cursor: pointer;
-  font-size: 13px; font-family: var(--sans); text-align: left; width: 100%;
-  transition: all .12s;
-}
-.nav-item:hover { background: var(--bg-hover); color: var(--text); }
-.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
-.nav-ic { font-size: 13px; width: 16px; text-align: center; opacity: .85; }
-
-.rail-label {
-  font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px;
-  color: var(--text-faint); padding: 6px 11px 6px; margin-top: 4px; font-weight: 600;
-}
-.project-list { display: flex; flex-direction: column; gap: 3px; }
-.project-item {
-  padding: 9px 11px; border-radius: 8px; cursor: pointer;
-  border: 1px solid transparent; transition: all .12s;
-}
-.project-item:hover { background: var(--bg-hover); }
-.project-item.active { background: var(--bg-active); border-color: var(--border); }
-.project-item .p-name { font-weight: 560; font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.project-item .p-meta { font-size: 11px; color: var(--text-faint); margin-top: 3px; display: flex; gap: 8px; }
-.project-item .p-cost { color: var(--accent); font-variant-numeric: tabular-nums; }
 .dot-active { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 7px var(--green); flex-shrink: 0; }
 
 /* ---------- List pane ---------- */
@@ -192,7 +152,7 @@ body {
 }
 .pane-resizer:hover::after, .pane-resizer:focus-visible::after,
 body.pane-resizing .pane-resizer[data-active="true"]::after { background: var(--accent); }
-.pane-resizer[hidden], .rail-collapsed .rail-resizer { display: none; }
+.pane-resizer[hidden] { display: none; }
 body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 /* ---------- Generic ---------- */
@@ -538,8 +498,17 @@ kbd {
 }
 .view-picker select { max-width: 122px; }
 .agent-picker select { max-width: 118px; }
-.compact-project-picker { display: none; }
-.rail-toggle { flex: 0 0 auto; -webkit-app-region: no-drag; font-size: 14px; }
+.project-picker { min-width: 0; }
+.project-picker select { width: clamp(120px, 14vw, 220px); max-width: 220px; }
+.session-picker { min-width: 0; }
+.session-picker select { width: clamp(130px, 16vw, 250px); max-width: 250px; }
+.session-picker select:disabled { opacity: .55; }
+.top-new-session {
+  flex: 0 0 auto; height: 30px; padding: 0 10px; border: 1px solid #4b6fa7;
+  border-radius: 3px; background: #263c5e; color: #eaf2ff; cursor: pointer;
+  font: 600 11px var(--sans); -webkit-app-region: no-drag;
+}
+.top-new-session:hover { background: #31517f; border-color: var(--accent); }
 .source-badge { color: #b8c9e8; border-color: #3e516f; background: #172033; }
 .source-settings { display: flex; flex-direction: column; gap: 6px; }
 .source-setting { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--border-soft); }
@@ -582,44 +551,7 @@ kbd {
 body.custom-window-controls .window-divider, body.custom-window-controls .window-btn { display: inline-block; }
 
 .body { min-height: 0; }
-.rail {
-  width: var(--rail-width); padding: 8px 7px 0; background: #13161c;
-  border-right-color: var(--border-soft); overflow: hidden;
-}
-.nav-group { gap: 1px; margin-bottom: 10px; }
-.nav-item {
-  min-height: 32px; gap: 9px; padding: 5px 8px; border-radius: 3px;
-  font-size: 12.5px; color: var(--text-dim);
-}
-.nav-item > span:nth-child(2) { flex: 1; }
-.nav-item kbd { opacity: 0; border-color: transparent; background: transparent; }
-.nav-item:hover kbd, .nav-item:focus-visible kbd { opacity: 1; }
-.nav-item.active { background: var(--bg-active); color: var(--text); font-weight: 550; box-shadow: inset 2px 0 var(--accent); }
-.nav-ic { width: 19px; color: var(--text-faint); font: 10px var(--mono); }
-.nav-item.active .nav-ic { color: var(--accent); }
-.rail-section-head {
-  display: flex; justify-content: space-between; align-items: center; padding: 7px 9px 6px;
-  border-top: 1px solid var(--border-soft); color: var(--text-faint);
-  font: 600 10px var(--mono); letter-spacing: .7px; text-transform: uppercase;
-}
-.rail-section-head .count { color: var(--text-dim); }
-.project-list { flex: 1; min-height: 0; overflow-y: auto; gap: 1px; }
-.project-item { padding: 7px 9px; border: 0; border-radius: 3px; }
-.project-item.active { background: var(--bg-active); border-color: transparent; box-shadow: inset 2px 0 var(--accent); }
-.project-item .p-name { font-size: 12.5px; }
-.project-item .p-meta { margin-top: 2px; font: 10.5px var(--mono); gap: 7px; }
-.project-item .p-cost { color: var(--text-dim); }
 .dot-active { width: 6px; height: 6px; box-shadow: none; }
-.rail-footer { margin: 7px -7px 0; padding: 7px; border-top: 1px solid var(--border-soft); }
-.rail-command {
-  display: flex; width: 100%; min-height: 31px; align-items: center; justify-content: space-between;
-  padding: 5px 7px; border: 1px solid var(--border); border-radius: 3px;
-  background: var(--bg-3); color: var(--text-dim); cursor: pointer;
-}
-.rail-command:hover { color: var(--text); background: var(--bg-hover); border-color: #465165; }
-.rail-collapsed .rail { display: none; }
-.rail-collapsed .rail-resizer { display: none; }
-
 .list-pane { width: var(--list-width); background: var(--bg-2); border-right-color: var(--border-soft); container: sessions / inline-size; }
 .list-head { padding: 11px 12px 8px; background: var(--bg-2); border-bottom-color: var(--border-soft); }
 .list-head h2 { font-size: 14px; }
@@ -784,7 +716,6 @@ body.custom-window-controls .window-divider, body.custom-window-controls .window
 .toast { max-width: 100%; overflow-wrap: anywhere; }
 
 @media (max-width: 1280px) {
-  .rail { width: clamp(168px, var(--rail-width), 190px); }
   .brand { min-width: 170px; }
   .list-pane { width: clamp(240px, var(--list-width), 286px); }
   .quick-launch { grid-template-columns: 1fr 1fr; }
@@ -803,7 +734,6 @@ body.custom-window-controls .window-divider, body.custom-window-controls .window
 #tab-body .transcript { max-width: 1400px; }
 
 @media (max-width: 1080px) {
-  .rail { width: 168px; }
   .brand-name, .input-hint { display: none; }
   .brand { min-width: 48px; }
   #search { padding-right: 10px; }
@@ -815,14 +745,9 @@ body.custom-window-controls .window-divider, body.custom-window-controls .window
 }
 
 @media (max-width: 860px) {
-  .rail { width: 54px; padding-inline: 6px; }
-  .rail .nav-item { justify-content: center; padding-inline: 5px; }
-  .rail .nav-item > span:nth-child(2), .rail .nav-item kbd,
-  .rail-section-head, .rail-group-label, .rail .project-list, .rail-footer { display: none; }
-  .rail .nav-ic { width: 28px; }
   .list-pane { width: 232px; }
-  .compact-project-picker { display: flex; min-width: 0; }
-  .compact-project-picker select { max-width: 150px; }
+  .project-picker select { max-width: 112px; }
+  .session-picker select { max-width: 124px; }
   #live-label { display: none; }
   .live-dot { margin-inline: 1px; }
   .statusbar { gap: 8px; }
@@ -831,8 +756,10 @@ body.custom-window-controls .window-divider, body.custom-window-controls .window
 
 @media (max-width: 720px) {
   .source-picker select { max-width: 92px; }
-  .view-picker { display: none; }
-  .compact-project-picker select { max-width: 126px; }
+  .view-picker select, .agent-picker select { max-width: 90px; }
+  .project-picker select { max-width: 90px; }
+  .session-picker select { max-width: 100px; }
+  .top-new-session { padding-inline: 8px; }
   .list-pane { width: 218px; }
   #help-trigger { display: none; }
   .topbar-right { gap: 1px; }
@@ -848,7 +775,7 @@ body.custom-window-controls .window-divider, body.custom-window-controls .window
   .modal-actions .btn { flex: 1 1 auto; justify-content: center; }
 }
 
-/* Detail content responds to the space left after the rail and session list,
+/* Detail content responds to the space left after the optional session list,
    not merely to the outer window width. This is what keeps three-pane views
    usable while the window is resized. */
 @container detail (max-width: 1400px) {
