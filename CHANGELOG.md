@@ -4,6 +4,63 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] — 2026-08-20
+
+A session is not a wall of messages. It is a sequence of things you asked for,
+each with a beginning, an end, and a stretch of work in between. This release
+rebuilds the app around that idea, and rebuilds the interface it is shown in.
+
+### Added
+- **Journey** — a new default view for every session. The backend segments the
+  transcript into **goals**: one per prompt you sent, spanning until the next
+  one arrives. Each goal records when it started and ended, how long the first
+  reply took, which *kinds* of tools ran inside it, whether the agent stopped to
+  ask you something, what failed, and what it cost.
+- A time-axis **ribbon** drawing one row per goal on a shared clock. Idle gaps
+  are collapsed to a labelled band, so an overnight pause costs the chart a few
+  pixels instead of two-thirds of its width, and every tool call appears as a
+  tick in its category colour. Hover for a readout, click to inspect.
+- A **goal inspector**: the prompt, duration, first-reply latency, every step in
+  order, the tools that failed, the files touched and the commands run.
+- Ten **work categories** — read, search, edit, shell, web, subagent, plan,
+  question, mcp, other — with one colour each, used identically in the journey
+  ribbon, the per-goal bars, the tool-usage chart and the transcript.
+- A **light theme**, and a full second palette behind it. Every colour in the
+  app now resolves to a design token; `Ctrl+Shift+L` switches.
+- A **session browser** in the sidebar with two modes: *Recent* (every session
+  on the machine, grouped Today / Yesterday / This week) and *Projects*
+  (expanding in place). Arrow keys walk it, Enter opens, `[` and `]` step
+  between neighbouring sessions, `Ctrl+B` collapses it.
+- **Session tabs** for recently opened sessions, so getting back to what you
+  were looking at is one click.
+- New charts: a 90-day activity calendar with month labels, a weekday-by-hour
+  heatmap of when you actually work, and per-project token and cost trends.
+- Goal segmentation and tool categorisation are covered by their own tests,
+  including a check that feeding a live session incrementally produces exactly
+  the same goals as parsing it in one pass.
+
+### Changed
+- The frontend was rewritten from one 2,900-line file into `web/css/` and
+  `web/js/` modules, each an isolated unit over a single shared namespace.
+  There is still no build step.
+- Global statistics now keep 90 days of daily activity (was 14) and a
+  weekday-by-hour distribution.
+- Session listings carry the context percentage, so the sidebar can show a
+  context meter without opening the session.
+- Monetary values are formatted by `Intl` rather than by concatenating a
+  currency symbol onto a grouped number, which produced `$1.998` for `$1,998`
+  in locales that group with dots.
+
+### Fixed
+- CLI scaffolding that arrives in the user role — command echoes, captured
+  stdout, injected reminders, Codex environment and plugin blocks — no longer
+  opens a goal or appears as something you typed.
+- A tool result that arrives after you have already sent the next prompt is
+  charged to the goal that made the call, not to the one you just started.
+- Session titles in the sidebar no longer overlap their timestamps.
+- Codex goals carry token counts and no dollar figure; ChatGPT-plan usage is
+  never presented as API spend.
+
 ## [2.0.4] — 2026-07-26
 
 ### Changed
