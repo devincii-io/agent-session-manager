@@ -358,8 +358,9 @@ class DetailBuilder:
         self.timeline: list[dict] = []
         self.output_per_turn: list[int] = []
         # Codex tokens are cumulative snapshots and carry no billing meaning, so
-        # goals are tracked unpriced (see asm/goals.py).
-        self.goals = goal_tracking.GoalTracker(priced=False)
+        # requests are tracked unpriced (see asm/goals.py). Codex has no /goal
+        # equivalent, so the goal side of the arc stays legitimately empty.
+        self.arc = goal_tracking.SessionArc(priced=False)
         self._last_goal_total = 0
         self.agent_calls: list[dict] = []
         self.sidechain_events: list[dict] = []
@@ -401,7 +402,7 @@ class DetailBuilder:
         self._append("user", ts, [{"type": "text", "text": clipped, "truncated": len(clean) > TEXT_TRUNCATE}])
         self.user_prompts += 1
         if not self.is_subagent:
-            self.goals.begin(clean, ts)
+            self.arc.begin(clean, ts)
         self._last_user_text = clean
         self._last_was_user = True
 
@@ -410,14 +411,14 @@ class DetailBuilder:
             value = args.get(key)
             if isinstance(value, str) and value:
                 self.files_touched[value] += 1
-                self.goals.file(value)
+                self.arc.file(value)
         command = args.get("command")
         if not command and name in ("exec", "shell_command"):
             command = args.get("input")
         if isinstance(command, str) and command.strip():
             head = command.strip().split()[0][:40]
             self.bash_commands[head] += 1
-            self.goals.command(head)
+            self.arc.command(head)
 
     def feed(self, rec: dict) -> None:
         if not isinstance(rec, dict):
@@ -447,7 +448,7 @@ class DetailBuilder:
             return
         if rtype == "compacted" or ptype == "context_compacted":
             self.compactions += 1
-            self.goals.compaction()
+            self.arc.compaction()
             return
         if rtype == "event_msg":
             if ptype == "user_message":
@@ -461,7 +462,7 @@ class DetailBuilder:
                 spent = int(self.usage.get("total") or 0) - self._last_goal_total
                 if spent > 0:
                     self._last_goal_total += spent
-                    self.goals.turn(ts, self.last_model, pricing.Usage(input=spent))
+                    self.arc.turn(ts, self.last_model, pricing.Usage(input=spent))
                 self.timeline.append({"t": ts, "ctx": self.last_context_tokens})
                 if len(self.timeline) > 300:
                     self.timeline.pop(0)
@@ -487,7 +488,7 @@ class DetailBuilder:
                 self._append("assistant", ts, [{"type": "text", "text": clipped, "truncated": len(text) > TEXT_TRUNCATE}], model=self.last_model)
                 self.assistant_turns += 1
                 self.text_chars += len(text)
-                self.goals.text(len(text), ts)
+                self.arc.text(len(text), ts)
                 self._last_was_user = False
             return
 
@@ -500,7 +501,7 @@ class DetailBuilder:
                 clipped = text[:TEXT_TRUNCATE]
                 self._append("assistant", ts, [{"type": "thinking", "text": clipped, "truncated": len(text) > TEXT_TRUNCATE}], model=self.last_model)
                 self.thinking_chars += len(text)
-                self.goals.thinking(len(text), ts)
+                self.arc.thinking(len(text), ts)
             self._last_was_user = False
             return
 
@@ -510,7 +511,7 @@ class DetailBuilder:
             preview, truncated = _preview(args)
             call_id = str(payload.get("call_id") or payload.get("id") or "")
             self.tool_counts[name] += 1
-            self.goals.tool(name, ts, call_id)
+            self.arc.tool(name, ts, call_id)
             if call_id:
                 self._tool_names[call_id] = name
             self._track_tool_input(name, args)
@@ -531,7 +532,9 @@ class DetailBuilder:
             is_error = _is_error_output(payload, preview)
             if is_error:
                 self.tool_errors[name] += 1
-                self.goals.tool_error(call_id, name)
+            # Reported for every result, not only failures: this is when the
+            # call finished, which is how long it took.
+            self.arc.tool_result(call_id, ts, is_error=is_error)
             self._append("user", ts, [{
                 "type": "tool_result", "tool_use_id": call_id,
                 "content_preview": preview, "content_truncated": truncated,
@@ -554,7 +557,7 @@ class DetailBuilder:
             "cost_available": False,
             "tool_counts": dict(self.tool_counts.most_common()),
             "timeline": list(self.timeline),
-            "goals": self.goals.result(),
+            **self.arc.result(self.last_ts),
             "context_window": self.context_window,
             "last_context_tokens": self.last_context_tokens,
             "context_pct": round(100.0 * self.last_context_tokens / self.context_window, 1) if self.context_window else 0.0,

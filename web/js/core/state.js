@@ -85,7 +85,8 @@
     openTabs: readJSON("openTabs", []),             // [{pid, sid, title, provider}]
 
     /* -- journey -------------------------------------------------------- */
-    goalIndex: null,
+    goalIndex: null,        // the selected /goal run
+    promptIndex: null,      // the selected prompt inside it
     goalFilter: new Set(),   // categories toggled *off*
     goalSort: "order",       // order | duration | tools | errors
 

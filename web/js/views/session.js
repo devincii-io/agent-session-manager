@@ -12,7 +12,7 @@
 
   /* The user role also carries the CLI's own scaffolding. It is real data,
      but it is not conversation, so it is folded away behind one toggle. */
-  const NOISE = /^<(local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|system-reminder|bash-(input|stdout|stderr))/;
+  const NOISE = /^<(local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|system-reminder|task-notification|user-prompt-submit-hook|bash-(input|stdout|stderr))/;
 
   function isNoise(event) {
     if (event.role !== "user") return false;
@@ -73,8 +73,9 @@
     const detail = State.detail || {};
     const provider = ASM.scope.currentProvider();
     const goals = (detail.goals && detail.goals.goals) || [];
+    const prompts = (detail.requests && detail.requests.requests) || [];
     const tabs = [
-      ["journey", "Journey", goals.length || null],
+      ["journey", "Journey", goals.length || prompts.length || null],
       ["analytics", "Analytics", null],
       ["transcript", "Transcript", detail.total_events || 0],
       ["subagents", "Subagents", (detail.subagents && detail.subagents.count) || 0],
@@ -257,6 +258,7 @@
     const provider = ASM.scope.currentProvider();
     const resume = provider === "codex" ? `codex resume ${State.sessionId}` : `claude --resume ${State.sessionId}`;
     const goals = detail.goals || {};
+    const requests = detail.requests || {};
     return `<div class="card">
       ${ui.kv([
         ["Session ID", State.sessionId || ""],
@@ -264,7 +266,8 @@
         ["Transcript", detail.path || ""],
         ["Events (total)", fmt.num(detail.total_events)],
         ["Events (loaded)", fmt.num((State.transcript && State.transcript.events.length) || 0)],
-        ["Goals segmented", `${fmt.num(goals.count || 0)}${goals.dropped ? ` (${goals.dropped} older dropped)` : ""}`],
+        ["Goals set", `${fmt.num(goals.count || 0)}${goals.count ? ` · ${goals.met || 0} met, ${goals.open || 0} open` : ""}`],
+        ["Prompts", `${fmt.num(requests.count || 0)}${requests.dropped ? ` (${requests.dropped} older dropped)` : ""}`],
         ["File checkpoints", `${history.count || 0} snapshots · ${fmt.bytes(history.bytes)}`],
         ["Resume", resume],
       ])}

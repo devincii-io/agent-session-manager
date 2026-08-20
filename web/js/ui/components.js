@@ -107,16 +107,30 @@
     return `<div class="stack ${options.tall ? "tall" : ""}">${segments}</div>`;
   }
 
+  /**
+   * The work legend: one chip per category, with how many calls and — when the
+   * caller has the timings — how long that kind of work actually took.
+   *
+   * The times are a union of overlapping calls, so they do not add up to the
+   * session length and are not presented as if they did.
+   */
   function categoryLegend(byCategory, options = {}) {
+    const times = options.ms || {};
     const entries = CATEGORIES
       .map((category) => [category, Number(byCategory && byCategory[category]) || 0])
-      .filter(([, count]) => count > 0 || options.showEmpty);
+      .filter(([category, count]) => count > 0 || times[category] > 0 || options.showEmpty);
     if (!entries.length) return "";
     return `<div class="jn-legend">${entries.map(([category, count]) => {
       const off = options.filter && options.filter.has(category);
+      const spent = Number(times[category]) || 0;
+      const label = CATEGORY_LABELS[category] || category;
+      const tip = `${label} — ${count} call${count === 1 ? "" : "s"}` +
+        (spent ? `, ${fmt.duration(spent)} of wall clock` : "") +
+        (options.action ? ` · click to ${off ? "show" : "hide"}` : "");
       return `<button class="jn-cat ${off ? "off" : ""}" data-action="${esc(options.action || "")}"
-        data-cat="${category}" title="${esc(CATEGORY_LABELS[category])} — click to ${off ? "show" : "hide"}">
-        ${categoryDot(category)}<span>${esc(CATEGORY_LABELS[category] || category)}</span><b>${count}</b></button>`;
+        data-cat="${category}" title="${esc(tip)}">
+        ${categoryDot(category)}<span>${esc(label)}</span><b>${count}</b>
+        ${spent ? `<i class="jc-ms">${esc(fmt.duration(spent))}</i>` : ""}</button>`;
     }).join("")}</div>`;
   }
 

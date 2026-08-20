@@ -8,11 +8,11 @@
 
 A fast desktop workbench for local **Claude Code and Codex** sessions.
 
-A transcript is a wall of messages. What you actually remember about a session is
-coarser: *I asked for X, it read some files, ran the tests twice, hit an error,
-asked me a question, and finished.* The **Journey** view reconstructs exactly
-that — one **goal** per prompt you sent, spanning until the next one arrives,
-drawn on a real clock with the idle gaps collapsed.
+When you set a **goal** with Claude Code's `/goal`, a Stop hook keeps the agent
+working until its condition holds. The **Journey** view reconstructs that run:
+when the goal was set, every time the hook refused to let the agent finish and
+why, when the condition was finally met — and everything that happened in
+between, on a real clock with the idle gaps collapsed.
 
 ![The Journey view](docs/journey-goal.png)
 
@@ -50,13 +50,16 @@ Docs: [CHANGELOG](CHANGELOG.md) · [CONTRIBUTING](CONTRIBUTING.md) ·
 
 ## What it shows
 
-- **Journey** — a session as the arc of the work. Every prompt becomes a goal
-  with a start, an end, a first-reply latency, the kinds of tools that ran inside
-  it, whether the agent stopped to ask you something, what failed, and what it
-  cost. A time-axis ribbon draws one row per goal with idle gaps collapsed to a
-  labelled band; clicking a row opens the goal, step by step. Ten work
-  categories — read, search, edit, shell, web, subagent, plan, question, mcp,
-  other — carry one colour each, used identically everywhere they appear.
+- **Journey** — a session as the arc of the work, at two levels.
+  **Goals** are `/goal` runs: how long each ran, the follow-ups you sent while
+  it was active, every blocked stop with the hook's reasoning, and the moment
+  the condition was met. Open one to see everything inside it — every tool call
+  in order, each prompt, the files touched and the commands run.
+  **Prompts** are the individual requests, each with a start, an end, a
+  first-reply latency and what it cost.
+  Ten work categories — read, search, edit, shell, web, subagent, plan,
+  question, mcp, other — carry one colour each and are timed from the call to
+  its result, so the legend reads `shell 489 · 1h 22m` rather than a bare count.
 - **Session browser** — *Recent* lists every session on the machine grouped
   Today / Yesterday / This week; *Projects* expands a project in place. Arrow
   keys walk it, `Enter` opens, `[`/`]` step between sessions, and recently opened
@@ -126,7 +129,7 @@ memory can be **deleted** (with confirmation).
 
 | | |
 |---|---|
-| ![Overview](docs/overview.png) **Overview** — spend, tokens, 90 days of activity, and when you actually work | ![Journey](docs/journey.png) **Journey** — the session on a clock, one row per goal |
+| ![Overview](docs/overview.png) **Overview** — spend, tokens, 90 days of activity, and when you actually work | ![Journey](docs/journey.png) **Journey** — goals on a clock, with everything that ran inside them |
 | ![Analytics](docs/analytics.png) **Analytics** — context pressure, cache economics, the tools that failed | ![Transcript](docs/transcript.png) **Transcript** — paged, with tool calls coloured by the kind of work |
 | ![Cleanup](docs/cleanup.png) **Cleanup** — narrow, select, and reclaim, with live sessions protected | ![Settings](docs/settings.png) **Settings** — only what you set is written to `settings.json` |
 | ![Monitor](docs/monitor.png) **Monitor** — what is running now, and the runtime state on disk | ![Light theme](docs/light.png) **Light theme** — the same palette, re-aimed for paper |
@@ -178,9 +181,9 @@ This avoids the multi-second extraction cost of a large Qt WebEngine one-file
 executable on every launch. Build its per-user installer with Inno Setup 6:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.0.0 packaging\agent-session-manager.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.1.0 packaging\agent-session-manager.iss
 Copy-Item README.md,LICENSE -Destination dist\AgentSessionManager
-Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.0.0-Windows-x64-portable.zip -Force
+Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.1.0-Windows-x64-portable.zip -Force
 ```
 
 On Linux the same spec produces a single portable `dist/AgentSessionManager`
@@ -190,7 +193,7 @@ cannot cross-compile, so run it on the target OS. From WSL or Linux, the guarded
 release helper builds in an isolated temporary environment:
 
 ```bash
-bash packaging/build-linux.sh 3.0.0
+bash packaging/build-linux.sh 3.1.0
 ```
 
 Before publishing, create `dist/SHA256SUMS.txt` with SHA-256 entries for every
@@ -208,7 +211,7 @@ asm/
   codex_session_parser.py  tolerant Codex rollout adapter
   codex_scanner.py    Codex project/session index and locator map
   sources.py          lazy native/WSL source discovery and path context
-  goals.py            goal segmentation + tool categorisation (shared by both parsers)
+  goals.py            /goal runs, per-prompt segmentation, tool categorisation and timing
   scanner.py          enumerate projects/sessions/memory/tasks/scratchpad/settings (cached)
   watcher.py          watchdog → Qt signals (live updates)
   actions.py          delete / bulk-delete / save / settings / statusline hook

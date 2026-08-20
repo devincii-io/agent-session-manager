@@ -28,12 +28,23 @@
 .jn-cat.off { opacity: .38; }
 .jn-cat .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .jn-cat b { color: var(--fg); font-family: var(--mono); font-size: 10.5px; font-weight: 600; }
+/* How long that kind of work took. Quieter than the count, because the count
+   is exact and the time is a union of overlapping calls. */
+.jn-cat .jc-ms {
+  font-style: normal; font-family: var(--mono); font-size: 10px;
+  color: var(--fg-faint); padding-left: 5px; margin-left: 3px;
+  border-left: 1px solid var(--line);
+}
 
 /* ---------- ribbon ---------- */
 
+/* Deliberately not `overflow: hidden`: the hover card is positioned inside
+   this box and is often taller than the room left below the row it belongs
+   to, so clipping here cut the readout in half. The canvas rounds its own
+   bottom corners instead, which is the only reason the clip was there. */
 .jn-ribbon {
   position: relative; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface); overflow: hidden; user-select: none;
+  background: var(--surface); user-select: none;
 }
 .jn-ribbon-head {
   display: flex; align-items: center; gap: 10px;
@@ -44,12 +55,15 @@
 .jn-ribbon-head .jrh-hint { margin-left: auto; font-size: 10.5px; }
 
 .jn-canvas-wrap { position: relative; }
-.jn-canvas-wrap canvas { display: block; width: 100%; cursor: crosshair; }
+.jn-canvas-wrap canvas {
+  display: block; width: 100%; cursor: crosshair;
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+}
 .jn-canvas-wrap canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* The floating readout. Positioned by script; styled only here. */
 .jn-hover {
-  position: absolute; z-index: 14; pointer-events: none;
+  position: absolute; z-index: 30; pointer-events: none;
   width: min(320px, calc(100% - 16px));
   background: var(--boost); border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm); box-shadow: var(--shadow-1);
@@ -79,38 +93,38 @@
   border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); overflow: hidden;
 }
-.jn-goal {
+.jn-prompt {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 11px; border-bottom: 1px solid var(--line);
   cursor: pointer; min-width: 0;
 }
-.jn-list .jn-goal:last-child { border-bottom: none; }
-.jn-goal:hover { background: var(--panel); }
-.jn-goal.active { background: var(--boost); box-shadow: inset 2px 0 0 var(--accent); }
+.jn-list .jn-prompt:last-child { border-bottom: none; }
+.jn-prompt:hover { background: var(--panel); }
+.jn-prompt.active { background: var(--boost); box-shadow: inset 2px 0 0 var(--accent); }
 
-.jn-goal .jg-num {
+.jn-prompt .jg-num {
   flex: none; width: 26px; text-align: right; font-family: var(--mono);
   font-size: 10.5px; color: var(--fg-faint);
 }
-.jn-goal .jg-outcome { flex: none; width: 7px; height: 26px; border-radius: 2px; background: var(--out-empty); }
-.jn-goal[data-outcome="done"] .jg-outcome { background: var(--out-done); }
-.jn-goal[data-outcome="recovered"] .jg-outcome { background: var(--out-recovered); }
-.jn-goal[data-outcome="error"] .jg-outcome { background: var(--out-error); }
-.jn-goal[data-outcome="question"] .jg-outcome { background: var(--out-question); }
+.jn-prompt .jg-outcome { flex: none; width: 7px; height: 26px; border-radius: 2px; background: var(--out-empty); }
+.jn-prompt[data-outcome="done"] .jg-outcome { background: var(--out-done); }
+.jn-prompt[data-outcome="recovered"] .jg-outcome { background: var(--out-recovered); }
+.jn-prompt[data-outcome="error"] .jg-outcome { background: var(--out-error); }
+.jn-prompt[data-outcome="question"] .jg-outcome { background: var(--out-question); }
 
-.jn-goal .jg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.jn-goal .jg-prompt {
+.jn-prompt .jg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.jn-prompt .jg-prompt-text {
   display: block; font-size: 12.5px; color: var(--fg); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
-.jn-goal[data-kind="command"] .jg-prompt { font-family: var(--mono); font-size: 11.5px; color: var(--cat-plan); }
-.jn-goal .jg-meta {
+.jn-prompt[data-kind="command"] .jg-prompt-text { font-family: var(--mono); font-size: 11.5px; color: var(--cat-plan); }
+.jn-prompt .jg-meta {
   display: flex; align-items: center; gap: 9px; font-size: 10.5px;
   color: var(--fg-faint); font-family: var(--mono); min-width: 0;
 }
-.jn-goal .jg-stack { width: 100%; }
-.jn-goal .jg-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
-.jn-goal .jg-dur { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+.jn-prompt .jg-stack { width: 100%; }
+.jn-prompt .jg-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.jn-prompt .jg-dur { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 
 /* ---------- goal inspector ---------- */
 
@@ -161,4 +175,79 @@
 @container main (max-width: 760px) {
   .jn-split { flex-direction: column; }
   .jn-detail-col { flex: none; width: 100%; position: static; }
+}
+
+
+/* ---------- goal cards ---------- */
+
+/* One /goal run. Collapsed it is the headline; open it carries everything
+   that happened while the Stop hook was holding the session open. */
+.jn-goals { display: flex; flex-direction: column; gap: 10px; }
+
+.jn-goal-card {
+  border: 1px solid var(--line); border-left: 3px solid var(--fg-faint);
+  border-radius: var(--radius); background: var(--surface);
+  padding: 11px 13px; display: flex; flex-direction: column; gap: 10px;
+}
+.jn-goal-card[data-status="met"] { border-left-color: var(--success); }
+.jn-goal-card[data-status="open"] { border-left-color: var(--primary); }
+.jn-goal-card[data-status="superseded"] { border-left-color: var(--fg-faint); opacity: .82; }
+.jn-goal-card.active { border-color: var(--line-strong); box-shadow: var(--shadow-1); opacity: 1; }
+
+.jn-goal-card .jg-head {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  text-align: left; font-size: 11.5px; color: var(--fg-faint); flex-wrap: wrap;
+}
+.jn-goal-card .jg-index {
+  font-size: 10px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.jn-goal-card .jg-when { font-family: var(--mono); font-size: 10.5px; }
+.jn-goal-card .jg-head .jg-dur { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+.jn-goal-card .jg-toggle { color: var(--accent); font-size: 11.5px; }
+.jn-goal-card .jg-head:hover .jg-toggle { text-decoration: underline; }
+
+.jn-goal-card .jg-condition {
+  font-size: 13px; line-height: 1.5; color: var(--fg);
+  max-height: 7em; overflow-y: auto;
+}
+.jn-goal-card .jg-work { display: flex; flex-direction: column; }
+
+.jg-detail { display: flex; flex-direction: column; gap: 13px; padding-top: 3px; }
+.jg-block { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+
+.jg-prompts { display: flex; flex-direction: column; gap: 3px; }
+.jg-prompt-row {
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 5px 8px; border-radius: var(--radius-sm); min-width: 0;
+  background: var(--panel);
+}
+.jg-prompt-row:hover { background: var(--boost); }
+.jg-prompt-row.active { background: var(--boost); box-shadow: inset 2px 0 0 var(--accent); }
+.jg-prompt-row .jg-outcome { height: 16px; }
+.jg-prompt-row .jgp-text {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jg-prompt-row .jgp-meta { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); }
+
+/* Each time the hook refused to let the agent stop, with its reasoning. */
+.jg-checks { font-size: 12px; }
+.jg-checks summary { cursor: pointer; color: var(--fg-dim); font-size: 11.5px; }
+.jg-check {
+  display: flex; gap: 9px; padding: 5px 0; border-top: 1px solid var(--line);
+  font-size: 11.5px; color: var(--fg-dim);
+}
+.jg-check .jc-time { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--warning); }
+.jg-check .jc-reason { flex: 1; min-width: 0; }
+
+.jg-met {
+  font-size: 12px; color: var(--fg-dim); padding: 8px 10px;
+  border-radius: var(--radius-sm); background: var(--success-soft);
+  border-left: 2px solid var(--success);
+}
+.jg-met b { color: var(--success); }
+.jg-open {
+  font-size: 12px; color: var(--fg-faint); padding: 8px 10px;
+  border-radius: var(--radius-sm); background: var(--panel);
 }

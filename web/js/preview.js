@@ -51,6 +51,16 @@
     }
     const tools = Object.values(byCategory).reduce((sum, count) => sum + count, 0);
     const errors = (spec.failAt || []).length;
+    // Each call occupies a slice of the request; shells take the longest.
+    const weight = { exec: 4, agent: 6, web: 3, read: 1, search: 1, edit: 1, plan: 1, ask: 8, mcp: 2, other: 1 };
+    const catMs = {};
+    let weighted = 0;
+    Object.entries(byCategory).forEach(([category, count]) => {
+      weighted += count * (weight[category] || 1);
+    });
+    Object.entries(byCategory).forEach(([category, count]) => {
+      catMs[category] = Math.round((count * (weight[category] || 1) / (weighted || 1)) * spec.ms * 0.62);
+    });
     return {
       i: index,
       kind: spec.kind || "prompt",
@@ -63,6 +73,8 @@
       turns: spec.turns,
       tools,
       by_cat: byCategory,
+      cat_ms: catMs,
+      tool_ms: Object.values(catMs).reduce((sum, value) => sum + value, 0),
       steps,
       dropped_steps: 0,
       errors,
@@ -117,11 +129,79 @@
   const GOALS = GOAL_SPECS.map((spec, index) => goal(index, spec));
   const totalTools = GOALS.reduce((sum, entry) => sum + entry.tools, 0);
   const byCategory = {};
+  const categoryTime = {};
   GOALS.forEach((entry) => {
     Object.entries(entry.by_cat).forEach(([category, count]) => {
       byCategory[category] = (byCategory[category] || 0) + count;
     });
+    Object.entries(entry.cat_ms).forEach(([category, value]) => {
+      categoryTime[category] = (categoryTime[category] || 0) + value;
+    });
   });
+
+  /** Roll a set of requests up into the /goal run that contained them. */
+  function goalRun(index, spec) {
+    const inside = spec.requests.map((i) => GOALS[i]);
+    const by = {};
+    const times = {};
+    inside.forEach((entry) => {
+      Object.entries(entry.by_cat).forEach(([category, count]) => {
+        by[category] = (by[category] || 0) + count;
+      });
+      Object.entries(entry.cat_ms).forEach(([category, value]) => {
+        times[category] = (times[category] || 0) + value;
+      });
+    });
+    const blocked = spec.checks.filter((check) => !check.met);
+    return {
+      i: index,
+      condition: spec.condition,
+      start: at(spec.start),
+      end: spec.end == null ? "" : at(spec.end),
+      ms: (spec.end == null ? 5 * HOUR : spec.end) - spec.start,
+      open: spec.end == null,
+      met: !!spec.met,
+      superseded: !!spec.superseded,
+      status: spec.met ? "met" : spec.superseded ? "superseded" : spec.end == null ? "open" : "ended",
+      checks: spec.checks.map((check) => ({ t: at(check.t), met: check.met, reason: check.reason })),
+      dropped_checks: 0,
+      blocked_stops: blocked.length,
+      last_reason: blocked.length ? blocked[blocked.length - 1].reason : "",
+      follow_ups: inside.filter((entry) => entry.kind === "prompt").length,
+      commands: inside.filter((entry) => entry.kind === "command").length,
+      request_ids: inside.map((entry) => entry.i),
+      turns: inside.reduce((sum, entry) => sum + entry.turns, 0),
+      tools: inside.reduce((sum, entry) => sum + entry.tools, 0),
+      by_cat: by,
+      cat_ms: times,
+      tool_ms: Object.values(times).reduce((sum, value) => sum + value, 0),
+      errors: inside.reduce((sum, entry) => sum + entry.errors, 0),
+      asked: inside.filter((entry) => entry.asked).length,
+      subagents: inside.reduce((sum, entry) => sum + entry.subagents, 0),
+      compactions: inside.reduce((sum, entry) => sum + entry.compactions, 0),
+      tokens: inside.reduce((sum, entry) => sum + entry.tokens, 0),
+      cost: Number(inside.reduce((sum, entry) => sum + entry.cost, 0).toFixed(2)),
+      files: [...new Set(inside.flatMap((entry) => entry.files))],
+    };
+  }
+
+  const GOAL_RUNS = [
+    goalRun(0, {
+      condition: "make the webhook idempotent and prove it with the tests",
+      start: 4 * MINUTE, end: 25 * MINUTE, superseded: true,
+      requests: [1, 2], checks: [],
+    }),
+    goalRun(1, {
+      condition: "keep going until refunds are idempotent too, the full suite is green, and it is written up",
+      start: 25 * MINUTE, end: 4 * HOUR + 44 * MINUTE, met: true,
+      requests: [3, 4, 5, 6],
+      checks: [
+        { t: 55 * MINUTE, met: false, reason: "Refunds are guarded but the load test has not been run since the change." },
+        { t: 4 * HOUR + 33 * MINUTE, met: false, reason: "The load test failed its p95 threshold; the write-up is still missing." },
+        { t: 4 * HOUR + 44 * MINUTE, met: true, reason: "Both paths key on the provider event id, the full suite and the load test pass, and docs/idempotency.md describes the change." },
+      ],
+    }),
+  ];
 
   const PROJECTS = [
     { provider: "claude", id: "preview::checkout-service", name: "checkout-service",
@@ -203,17 +283,31 @@
       ctx: index < 22 ? 40_000 + index * 7_400 : 52_000 + (index - 22) * 6_900,
       cost: Number((index * 0.42).toFixed(2)),
     })),
-    goals: {
-      goals: GOALS,
+    requests: {
+      requests: GOALS,
       dropped: 0,
       count: GOALS.length,
       by_cat: byCategory,
+      cat_ms: categoryTime,
+      tool_ms: Object.values(categoryTime).reduce((sum, value) => sum + value, 0),
       total_ms: GOALS.reduce((sum, entry) => sum + entry.ms, 0),
       median_ms: 7 * MINUTE + seconds(45),
       questions: GOALS.filter((entry) => entry.asked).length,
       failed: GOALS.filter((entry) => entry.outcome === "error").length,
       priced: true,
       categories: ASM.ui ? ASM.ui.CATEGORIES : [],
+    },
+    goals: {
+      goals: GOAL_RUNS,
+      dropped: 0,
+      count: GOAL_RUNS.length,
+      open: GOAL_RUNS.filter((run) => run.open).length,
+      met: GOAL_RUNS.filter((run) => run.met).length,
+      superseded: GOAL_RUNS.filter((run) => run.superseded).length,
+      total_ms: GOAL_RUNS.reduce((sum, run) => sum + run.ms, 0),
+      median_ms: GOAL_RUNS.length ? GOAL_RUNS[0].ms : 0,
+      blocked_stops: GOAL_RUNS.reduce((sum, run) => sum + run.blocked_stops, 0),
+      follow_ups: GOAL_RUNS.reduce((sum, run) => sum + run.follow_ups, 0),
     },
     analytics: {
       user_prompts: GOALS.length,

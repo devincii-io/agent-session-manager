@@ -1,23 +1,31 @@
-"""Goal segmentation: turning a flat transcript into the arc of the work.
+"""The arc of a session, at the two levels a person actually thinks in.
 
-A session transcript is a list of messages. What a person actually remembers
-about a session is coarser: *"I asked for X, it read some files, ran the tests
-twice, hit an error, asked me a question, and finished."* That shape — one user
-prompt, everything the agent did until the next prompt, and how it ended — is
-what this module reconstructs.
+**Goals** are Claude Code's ``/goal`` directives: a session-scoped Stop hook
+with a condition, which blocks the agent from stopping until that condition
+holds. A goal has a real beginning (you set it), a real end (it was met, you
+replaced it, or the session ended with it still open), and a measurable middle.
 
-One **goal** spans from a real user prompt to the moment the next one arrives.
-Tool results are not prompts, so a goal survives the whole tool loop. Each goal
-records when it started and ended, which *kinds* of tools ran inside it (reads
-are not edits, and neither is a shell command), whether the agent stopped to ask
-something, and what it cost.
+**Requests** are the individual prompts you sent. While a goal is active they
+are follow-ups *inside* it — you steering something already running — which is
+why they are tracked separately and rolled up into the goal that was open.
 
-The tracker is fed incrementally, exactly like the summary and detail builders
-around it, so a live session appends to the open goal instead of re-deriving
-every goal on each refresh.
+Both are reconstructed incrementally, exactly like the summary and detail
+builders around them, so a live session appends instead of re-deriving.
+
+The goal records come from the transcript's own ``goal_status`` attachments::
+
+    {"type": "goal_status", "met": false, "sentinel": true, "condition": "…"}
+    {"type": "goal_status", "met": false, "condition": "…", "reason": "…"}
+    {"type": "goal_status", "met": true,  "condition": "…", "reason": "…"}
+
+The first is the goal being set. The second is the hook refusing a stop, with
+its reasoning — the checkpoints along the way. The third is the goal being met,
+which ends it.
 """
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from . import pricing
 
@@ -64,9 +72,19 @@ _CATEGORY_BY_NAME = {
 #: Display order and labels for the categories, consumed by the frontend legend.
 CATEGORIES = ("read", "search", "edit", "exec", "web", "agent", "plan", "ask", "mcp", "other")
 
-MAX_GOALS = 400          # a session with more prompts than this keeps the newest
-MAX_STEPS = 240          # per goal; enough to draw a dense lane, bounded payload
+MAX_REQUESTS = 400       # a session with more prompts than this keeps the newest
+MAX_STEPS = 240          # per request; enough to draw a dense lane, bounded payload
+MAX_GOALS = 40           # /goal is set by hand; more than this is not a real session
+MAX_CHECKS = 60          # stop-hook evaluations kept per goal
+MAX_PENDING_CALLS = 4000
 PROMPT_PREVIEW = 260
+CONDITION_PREVIEW = 400
+REASON_PREVIEW = 600
+
+# A single tool call is not allowed to claim more than this much wall clock.
+# Without it, one call whose result was never written (an interrupted session)
+# would absorb the rest of the transcript.
+MAX_CALL_MS = 60 * 60 * 1000
 
 
 def categorize(name: str) -> str:
@@ -93,14 +111,18 @@ def categorize(name: str) -> str:
 
 
 # Wrappers the CLI writes into the user role that no person typed: command
-# echoes, captured stdout, injected reminders. They must not open a goal, or a
-# session's arc becomes a list of plumbing with the real requests buried in it.
+# echoes, captured stdout, injected reminders. They must not open a request, or
+# a session's arc becomes a list of plumbing with the real prompts buried in it.
+# The Stop-hook directive is here for the same reason — it *is* the goal, and it
+# is tracked as one; it is not something you asked for.
 _NOISE_PREFIXES = (
     # Claude Code
     "<local-command-caveat", "<local-command-stdout", "<local-command-stderr",
     "<command-message", "<command-args", "<system-reminder",
     "<bash-input", "<bash-stdout", "<bash-stderr", "caveat:",
-    "[request interrupted", "<user-prompt-submit-hook",
+    "[request interrupted", "<user-prompt-submit-hook", "<task-notification",
+    "a session-scoped stop hook is now active",
+    "this session is being continued from a previous conversation",
     # Codex
     "<environment_context", "<user_instructions", "<recommended_plugins",
     "<instructions", "# agents.md instructions", "# files mentioned by the user",
@@ -136,12 +158,80 @@ def classify_prompt(text: str) -> tuple[str, str]:
     return "prompt", " ".join(lines)[:PROMPT_PREVIEW]
 
 
-def _clean_prompt(text: str) -> str:
-    """A prompt as a person would recognise it: one line, no XML scaffolding."""
-    return classify_prompt(text)[1]
+def epoch_ms(ts: str) -> int:
+    """An ISO-8601 stamp as epoch milliseconds; 0 when unusable."""
+    if not ts:
+        return 0
+    try:
+        return int(datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
 
 
-class Goal:
+def span_ms(start: str, end: str) -> int:
+    """Milliseconds between two ISO-8601 stamps; 0 when either is unusable."""
+    a, b = epoch_ms(start), epoch_ms(end)
+    if not a or not b:
+        return 0
+    return b - a if b > a else 0
+
+
+def _median(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+class Spans:
+    """Wall-clock time per category, counting overlap only once.
+
+    Agents run tools in parallel, so adding up call durations overstates time
+    badly — three greps at once are not three grep-minutes. Each category keeps
+    the union of its intervals instead. Calls arrive in roughly chronological
+    order, so merging against the last open interval is enough and costs
+    nothing per call.
+
+    Categories can still overlap *each other* (a read during a shell command),
+    so the per-category figures deliberately do not sum to the session length.
+    """
+
+    __slots__ = ("_open", "ms")
+
+    def __init__(self) -> None:
+        self._open: dict[str, list[int]] = {}
+        self.ms: dict[str, int] = {}
+
+    def add(self, category: str, start: int, end: int) -> None:
+        if not start or end <= start:
+            return
+        end = min(end, start + MAX_CALL_MS)
+        current = self._open.get(category)
+        if current is not None and start <= current[1]:
+            if end > current[1]:
+                self.ms[category] = self.ms.get(category, 0) + (end - current[1])
+                current[1] = end
+            return
+        self._open[category] = [start, end]
+        self.ms[category] = self.ms.get(category, 0) + (end - start)
+
+    def result(self) -> dict[str, int]:
+        return {category: value for category, value in self.ms.items() if value > 0}
+
+    @property
+    def total(self) -> int:
+        return sum(self.ms.values())
+
+
+# --------------------------------------------------------------------------- #
+# requests: one per prompt                                                     #
+# --------------------------------------------------------------------------- #
+
+
+class Request:
     """One user prompt and everything that happened until the next one."""
 
     __slots__ = (
@@ -149,7 +239,7 @@ class Goal:
         "errors", "error_names", "subagents", "asked", "files", "commands",
         "usage_by_model", "output_tokens", "thinking_chars", "text_chars",
         "models", "first_response", "dropped_steps", "compactions", "priced",
-        "kind",
+        "kind", "spans",
     )
 
     def __init__(self, index: int, prompt: str, ts: str) -> None:
@@ -174,8 +264,9 @@ class Goal:
         self.first_response = ""
         self.dropped_steps = 0
         self.compactions = 0
-        # Codex records tokens but proves nothing about billing, so its goals
-        # carry token counts and no dollar figure at all.
+        self.spans = Spans()
+        # Codex records tokens but proves nothing about billing, so its
+        # requests carry token counts and no dollar figure at all.
         self.priced = True
         self.kind = "prompt"
 
@@ -185,8 +276,7 @@ class Goal:
         if ts and ts > self.end:
             self.end = ts
 
-    def add_tool(self, name: str, ts: str, call_id: str = "") -> None:
-        category = categorize(name)
+    def add_tool(self, name: str, category: str, ts: str, call_id: str = "") -> None:
         self.by_cat[category] = self.by_cat.get(category, 0) + 1
         if category == "ask":
             self.asked = True
@@ -200,6 +290,14 @@ class Goal:
         else:
             self.dropped_steps += 1
         self.touch(ts)
+
+    def close_call(self, call_id: str, category: str, start: int, end: int) -> None:
+        self.spans.add(category, start, end)
+        if call_id:
+            for step in reversed(self.steps):
+                if step.get("id") == call_id:
+                    step["ms"] = max(0, min(end - start, MAX_CALL_MS))
+                    break
 
     def mark_error(self, call_id: str, name: str = "") -> None:
         self.errors += 1
@@ -231,7 +329,7 @@ class Goal:
         return sum(self.by_cat.values())
 
     def _outcome(self) -> str:
-        """How the goal ended, in the terms a person would use."""
+        """How the request ended, in the terms a person would use."""
         if self.asked:
             return "question"
         if not self.turns and not self.tool_calls and not self.text_chars:
@@ -253,11 +351,13 @@ class Goal:
             "start": self.start,
             "end": self.end,
             "first_response": self.first_response,
-            "ms": _span_ms(self.start, self.end),
-            "latency_ms": _span_ms(self.start, self.first_response),
+            "ms": span_ms(self.start, self.end),
+            "latency_ms": span_ms(self.start, self.first_response),
             "turns": self.turns,
             "tools": self.tool_calls,
             "by_cat": dict(self.by_cat),
+            "cat_ms": self.spans.result(),
+            "tool_ms": self.spans.total,
             "steps": list(self.steps),
             "dropped_steps": self.dropped_steps,
             "errors": self.errors,
@@ -277,163 +377,423 @@ class Goal:
         }
 
 
-def _span_ms(start: str, end: str) -> int:
-    """Milliseconds between two ISO-8601 stamps; 0 when either is unusable."""
-    if not start or not end:
-        return 0
-    from datetime import datetime
-
-    try:
-        a = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
-        b = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
-    except ValueError:
-        return 0
-    delta = (b - a).total_seconds() * 1000.0
-    return int(delta) if delta > 0 else 0
-
-
-class GoalTracker:
-    """Incremental goal segmentation shared by the Claude and Codex parsers."""
+class RequestTracker:
+    """Incremental per-prompt segmentation, shared by both parsers."""
 
     def __init__(self, *, priced: bool = True) -> None:
-        self.goals: list[Goal] = []
+        self.requests: list[Request] = []
         self.priced = priced
         self.dropped = 0
         self._counter = 0
-        self._pending_calls: dict[str, tuple[int, str]] = {}  # call_id -> (goal idx, name)
+        self.spans = Spans()
 
-    # -- feeding ------------------------------------------------------------ #
-
-    def begin(self, prompt: str, ts: str) -> None:
-        """Start a new goal — for every *real* user prompt, and nothing else."""
+    def begin(self, prompt: str, ts: str) -> str:
+        """Start a request for a real user prompt; returns its kind."""
         kind, cleaned = classify_prompt(prompt)
         if kind == "noise":
             # Scaffolding, not a request. Whatever follows still belongs to the
-            # goal that is already open.
+            # request that is already open.
             self.touch(ts)
-            return
-        goal = Goal(self._counter, cleaned, ts or "")
-        goal.kind = kind
-        goal.priced = self.priced
+            return kind
+        request = Request(self._counter, cleaned, ts or "")
+        request.priced = self.priced
+        request.kind = kind
         self._counter += 1
-        self.goals.append(goal)
-        if len(self.goals) > MAX_GOALS:
+        self.requests.append(request)
+        if len(self.requests) > MAX_REQUESTS:
             # Keep the newest window; the frontend is told how many were dropped
             # so it never presents a truncated arc as the whole session.
             self.dropped += 1
-            self.goals.pop(0)
+            self.requests.pop(0)
+        return kind
 
     @property
-    def current(self) -> Goal | None:
-        return self.goals[-1] if self.goals else None
+    def current(self) -> Request | None:
+        return self.requests[-1] if self.requests else None
 
-    def _ensure(self, ts: str) -> Goal:
-        """A goal to attribute work to even when a session starts mid-stream.
+    def ensure(self, ts: str) -> Request:
+        """Somewhere to attribute work when a session starts mid-stream.
 
         A resumed session, or one whose first user record is CLI scaffolding,
         does work before any prompt this tracker recognises. That work is real
-        and is kept — under a goal marked ``implicit`` so the UI can say what
+        and is kept — under a request marked ``implicit`` so the UI can say what
         it is instead of showing an empty prompt.
         """
-        goal = self.current
-        if goal is None:
-            goal = Goal(self._counter, "", ts or "")
-            goal.priced = self.priced
-            goal.kind = "implicit"
+        request = self.current
+        if request is None:
+            request = Request(self._counter, "", ts or "")
+            request.priced = self.priced
+            request.kind = "implicit"
             self._counter += 1
-            self.goals.append(goal)
-        return goal
+            self.requests.append(request)
+        return request
 
-    def tool(self, name: str, ts: str, call_id: str = "") -> None:
-        goal = self._ensure(ts)
-        goal.add_tool(name, ts, call_id)
-        if call_id:
-            self._pending_calls[call_id] = (goal.index, str(name))
-            if len(self._pending_calls) > 4000:      # bounded; oldest first
-                for key in list(self._pending_calls)[:2000]:
-                    self._pending_calls.pop(key, None)
-
-    def tool_error(self, call_id: str, name: str = "") -> None:
-        """A tool result that came back as an error.
-
-        The result can land in a later goal than the call did (the user typed
-        while a tool ran), so the error is charged to the goal that *made* the
-        call whenever the call id is known.
-        """
-        owner = self.current
-        known = self._pending_calls.get(call_id) if call_id else None
-        if known is not None:
-            index, tool_name = known
-            for goal in reversed(self.goals):
-                if goal.index == index:
-                    goal.mark_error(call_id, tool_name)
-                    return
-            name = name or tool_name
-        if owner is not None:
-            owner.mark_error(call_id, name)
-
-    def turn(self, ts: str, model: str = "", usage: pricing.Usage | None = None) -> None:
-        self._ensure(ts).add_turn(ts, model, usage)
-
-    def thinking(self, chars: int, ts: str = "") -> None:
-        goal = self._ensure(ts)
-        goal.thinking_chars += chars
-        goal.touch(ts)
-
-    def text(self, chars: int, ts: str = "") -> None:
-        goal = self._ensure(ts)
-        goal.text_chars += chars
-        goal.touch(ts)
-
-    def file(self, path: str) -> None:
-        goal = self.current
-        if goal is not None and path:
-            goal.files[str(path)] = goal.files.get(str(path), 0) + 1
-
-    def command(self, command: str) -> None:
-        goal = self.current
-        if goal is not None and command:
-            goal.commands[str(command)] = goal.commands.get(str(command), 0) + 1
-
-    def compaction(self) -> None:
-        goal = self.current
-        if goal is not None:
-            goal.compactions += 1
+    def by_index(self, index: int) -> Request | None:
+        for request in reversed(self.requests):
+            if request.index == index:
+                return request
+        return None
 
     def touch(self, ts: str) -> None:
-        goal = self.current
-        if goal is not None:
-            goal.touch(ts)
+        request = self.current
+        if request is not None:
+            request.touch(ts)
 
     # -- output ------------------------------------------------------------- #
 
     def result(self) -> dict:
-        goals = [goal.to_dict() for goal in self.goals]
-        active = [g for g in goals if g["tools"] or g["turns"]]
-        total_ms = sum(g["ms"] for g in active)
+        requests = [request.to_dict() for request in self.requests]
+        active = [item for item in requests if item["tools"] or item["turns"]]
         by_cat: dict[str, int] = {}
-        for goal in goals:
-            for category, count in goal["by_cat"].items():
+        for item in requests:
+            for category, count in item["by_cat"].items():
                 by_cat[category] = by_cat.get(category, 0) + count
         return {
-            "goals": goals,
+            "requests": requests,
             "dropped": self.dropped,
             "count": self._counter,
             "by_cat": by_cat,
-            "total_ms": total_ms,
-            "median_ms": _median([g["ms"] for g in active]),
+            "cat_ms": self.spans.result(),
+            "tool_ms": self.spans.total,
+            "total_ms": sum(item["ms"] for item in active),
+            "median_ms": _median([item["ms"] for item in active]),
             "priced": self.priced,
-            "questions": sum(1 for g in goals if g["asked"]),
-            "failed": sum(1 for g in goals if g["outcome"] == "error"),
+            "questions": sum(1 for item in requests if item["asked"]),
+            "failed": sum(1 for item in requests if item["outcome"] == "error"),
             "categories": list(CATEGORIES),
         }
 
 
-def _median(values: list[int]) -> int:
-    if not values:
-        return 0
-    ordered = sorted(values)
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[middle]
-    return (ordered[middle - 1] + ordered[middle]) // 2
+# --------------------------------------------------------------------------- #
+# goals: Claude Code's /goal stop hook                                          #
+# --------------------------------------------------------------------------- #
+
+
+class GoalRun:
+    """One ``/goal`` directive, from the moment it was set until it ended."""
+
+    __slots__ = ("index", "condition", "start", "end", "met", "superseded",
+                 "checks", "dropped_checks", "follow_ups", "commands", "turns",
+                 "by_cat", "errors", "asked", "subagents", "compactions",
+                 "usage_by_model", "priced", "files", "spans", "request_ids")
+
+    def __init__(self, index: int, condition: str, ts: str, *, priced: bool = True) -> None:
+        self.index = index
+        self.condition = condition
+        self.start = ts
+        self.end = ""
+        self.met = False
+        self.superseded = False
+        self.checks: list[dict] = []
+        self.dropped_checks = 0
+        # everything that happened while it was open
+        self.follow_ups = 0
+        self.commands = 0
+        self.turns = 0
+        self.by_cat: dict[str, int] = {}
+        self.errors = 0
+        self.asked = 0
+        self.subagents = 0
+        self.compactions = 0
+        self.usage_by_model: dict[str, pricing.Usage] = {}
+        self.files: set[str] = set()
+        self.spans = Spans()
+        self.request_ids: list[int] = []
+        self.priced = priced
+
+    @property
+    def open(self) -> bool:
+        return not self.end
+
+    def add_check(self, met: bool, reason: str, ts: str) -> None:
+        if len(self.checks) < MAX_CHECKS:
+            self.checks.append({"t": ts, "met": met, "reason": (reason or "")[:REASON_PREVIEW]})
+        else:
+            self.dropped_checks += 1
+
+    def close(self, ts: str, *, met: bool, superseded: bool = False) -> None:
+        self.end = ts or self.end
+        self.met = met
+        self.superseded = superseded
+
+    def status(self) -> str:
+        if self.met:
+            return "met"
+        if self.superseded:
+            return "superseded"
+        if self.open:
+            return "open"
+        return "ended"
+
+    @property
+    def tool_calls(self) -> int:
+        return sum(self.by_cat.values())
+
+    def to_dict(self, last_ts: str = "") -> dict:
+        # An open goal is measured to the last thing that happened in the
+        # session, and labelled open — never quietly closed at the last event.
+        end = self.end or last_ts
+        blocked = [check for check in self.checks if not check["met"]]
+        cost = sum(pricing.cost_for(u, m) for m, u in self.usage_by_model.items()) if self.priced else 0.0
+        return {
+            "i": self.index,
+            "condition": self.condition,
+            "start": self.start,
+            "end": self.end,
+            "ms": span_ms(self.start, end),
+            "open": self.open,
+            "met": self.met,
+            "superseded": self.superseded,
+            "status": self.status(),
+            "checks": list(self.checks),
+            "dropped_checks": self.dropped_checks,
+            "blocked_stops": len(blocked),
+            "last_reason": (blocked[-1]["reason"] if blocked
+                            else (self.checks[-1]["reason"] if self.checks else "")),
+            "follow_ups": self.follow_ups,
+            "commands": self.commands,
+            "request_ids": list(self.request_ids),
+            "turns": self.turns,
+            "tools": self.tool_calls,
+            "by_cat": dict(self.by_cat),
+            "cat_ms": self.spans.result(),
+            "tool_ms": self.spans.total,
+            "errors": self.errors,
+            "asked": self.asked,
+            "subagents": self.subagents,
+            "compactions": self.compactions,
+            "tokens": sum(u.total for u in self.usage_by_model.values()),
+            "cost": round(cost, 4),
+            "files": sorted(self.files)[:10],
+        }
+
+
+class GoalTracker:
+    """Reconstructs ``/goal`` runs from the transcript's goal_status attachments."""
+
+    def __init__(self, *, priced: bool = True) -> None:
+        self.goals: list[GoalRun] = []
+        self.dropped = 0
+        self.priced = priced
+        self._counter = 0
+
+    @property
+    def current(self) -> GoalRun | None:
+        for goal in reversed(self.goals):
+            if goal.open:
+                return goal
+        return None
+
+    def _append(self, goal: GoalRun) -> None:
+        self.goals.append(goal)
+        if len(self.goals) > MAX_GOALS:
+            self.dropped += 1
+            self.goals.pop(0)
+
+    def set_goal(self, condition: str, ts: str) -> None:
+        """A goal was set. Any goal still open is replaced, not forgotten."""
+        condition = (condition or "").strip()[:CONDITION_PREVIEW]
+        open_goal = self.current
+        if open_goal is not None:
+            if open_goal.condition == condition:
+                return          # the same goal re-announced; not a new run
+            open_goal.close(ts, met=False, superseded=True)
+        self._counter += 1
+        self._append(GoalRun(self._counter - 1, condition, ts or "", priced=self.priced))
+
+    def status(self, condition: str, met: bool, reason: str, ts: str) -> None:
+        """The Stop hook evaluated the condition — either blocking or releasing."""
+        condition = (condition or "").strip()[:CONDITION_PREVIEW]
+        goal = self.current
+        if goal is None or (condition and goal.condition != condition):
+            # A status for a goal we never saw set — a resumed session, or a
+            # transcript window that starts mid-run. Open one so it is not lost.
+            if not condition:
+                return
+            self._counter += 1
+            goal = GoalRun(self._counter - 1, condition, ts or "", priced=self.priced)
+            self._append(goal)
+        goal.add_check(met, reason, ts or "")
+        if met:
+            goal.close(ts, met=True)
+
+    def feed_record(self, record: dict) -> bool:
+        """Consume a raw transcript record; True if it was a goal event.
+
+        Goal events arrive as attachments rather than messages, so this runs
+        before the message-shaped parsing the rest of the builder does.
+        """
+        if not isinstance(record, dict):
+            return False
+        attachment = record.get("attachment")
+        if not isinstance(attachment, dict) or attachment.get("type") != "goal_status":
+            return False
+        ts = str(record.get("timestamp") or "")
+        condition = str(attachment.get("condition") or "")
+        met = bool(attachment.get("met"))
+        if attachment.get("sentinel") and not met:
+            self.set_goal(condition, ts)
+        else:
+            self.status(condition, met, str(attachment.get("reason") or ""), ts)
+        return True
+
+    def result(self, last_ts: str = "") -> dict:
+        goals = [goal.to_dict(last_ts) for goal in self.goals]
+        durations = [goal["ms"] for goal in goals if goal["ms"]]
+        return {
+            "goals": goals,
+            "dropped": self.dropped,
+            "count": self._counter,
+            "open": sum(1 for goal in goals if goal["open"]),
+            "met": sum(1 for goal in goals if goal["met"]),
+            "superseded": sum(1 for goal in goals if goal["superseded"]),
+            "total_ms": sum(durations),
+            "median_ms": _median(durations),
+            "blocked_stops": sum(goal["blocked_stops"] for goal in goals),
+            "follow_ups": sum(goal["follow_ups"] for goal in goals),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# the two levels, fed as one                                                    #
+# --------------------------------------------------------------------------- #
+
+
+class SessionArc:
+    """The single entry point the parsers feed.
+
+    Everything is recorded once and attributed to both levels at the moment it
+    happens — the open request, and the goal that was running. Nothing is
+    reconstructed afterwards by matching timestamps, which is what made an
+    early version charge a long-running request to the wrong goal.
+    """
+
+    def __init__(self, *, priced: bool = True) -> None:
+        self.requests = RequestTracker(priced=priced)
+        self.goals = GoalTracker(priced=priced)
+        # call_id -> (request index, tool name, category, start ms, goal index)
+        self._pending: dict[str, tuple[int, str, str, int, int]] = {}
+
+    # -- goals -------------------------------------------------------------- #
+
+    def feed_record(self, record: dict) -> bool:
+        """Offer a raw record to the goal tracker; True if it consumed it."""
+        return self.goals.feed_record(record)
+
+    # -- requests ----------------------------------------------------------- #
+
+    def begin(self, prompt: str, ts: str) -> None:
+        kind = self.requests.begin(prompt, ts)
+        goal = self.goals.current
+        if goal is None or kind == "noise":
+            return
+        request = self.requests.current
+        if request is not None:
+            goal.request_ids.append(request.index)
+        if kind == "command":
+            goal.commands += 1
+        else:
+            goal.follow_ups += 1
+
+    def tool(self, name: str, ts: str, call_id: str = "") -> None:
+        category = categorize(name)
+        request = self.requests.ensure(ts)
+        request.add_tool(name, category, ts, call_id)
+        goal = self.goals.current
+        if goal is not None:
+            goal.by_cat[category] = goal.by_cat.get(category, 0) + 1
+            if category == "ask":
+                goal.asked += 1
+            if category == "agent":
+                goal.subagents += 1
+        if call_id:
+            self._pending[call_id] = (
+                request.index, str(name), category, epoch_ms(ts),
+                goal.index if goal is not None else -1,
+            )
+            if len(self._pending) > MAX_PENDING_CALLS:
+                for key in list(self._pending)[: MAX_PENDING_CALLS // 2]:
+                    self._pending.pop(key, None)
+
+    def tool_result(self, call_id: str, ts: str, *, is_error: bool = False) -> None:
+        """A tool call came back. This is where a call's real duration is known."""
+        pending = self._pending.pop(call_id, None) if call_id else None
+        if pending is not None:
+            index, name, category, started, goal_index = pending
+            finished = epoch_ms(ts)
+            request = self.requests.by_index(index)
+            if request is not None and started and finished > started:
+                request.close_call(call_id, category, started, finished)
+            if started and finished > started:
+                self.requests.spans.add(category, started, finished)
+                for goal in self.goals.goals:
+                    if goal.index == goal_index:
+                        goal.spans.add(category, started, finished)
+                        break
+            if is_error:
+                if request is not None:
+                    request.mark_error(call_id, name)
+                for goal in self.goals.goals:
+                    if goal.index == goal_index:
+                        goal.errors += 1
+                        break
+            return
+        if is_error:
+            # An error for a call we never saw — charge the open request so the
+            # count still reflects reality.
+            request = self.requests.current
+            if request is not None:
+                request.mark_error(call_id, "")
+            goal = self.goals.current
+            if goal is not None:
+                goal.errors += 1
+
+    def turn(self, ts: str, model: str = "", usage: pricing.Usage | None = None) -> None:
+        self.requests.ensure(ts).add_turn(ts, model, usage)
+        goal = self.goals.current
+        if goal is not None:
+            goal.turns += 1
+            if usage is not None:
+                goal.usage_by_model.setdefault(model or "unknown", pricing.Usage()).add(usage)
+
+    def thinking(self, chars: int, ts: str = "") -> None:
+        request = self.requests.ensure(ts)
+        request.thinking_chars += chars
+        request.touch(ts)
+
+    def text(self, chars: int, ts: str = "") -> None:
+        request = self.requests.ensure(ts)
+        request.text_chars += chars
+        request.touch(ts)
+
+    def file(self, path: str) -> None:
+        request = self.requests.current
+        if request is not None and path:
+            request.files[str(path)] = request.files.get(str(path), 0) + 1
+        goal = self.goals.current
+        if goal is not None and path:
+            goal.files.add(str(path))
+
+    def command(self, command: str) -> None:
+        request = self.requests.current
+        if request is not None and command:
+            request.commands[str(command)] = request.commands.get(str(command), 0) + 1
+
+    def compaction(self) -> None:
+        request = self.requests.current
+        if request is not None:
+            request.compactions += 1
+        goal = self.goals.current
+        if goal is not None:
+            goal.compactions += 1
+
+    def touch(self, ts: str) -> None:
+        self.requests.touch(ts)
+
+    # -- output ------------------------------------------------------------- #
+
+    def result(self, last_ts: str = "") -> dict:
+        return {
+            "requests": self.requests.result(),
+            "goals": self.goals.result(last_ts),
+        }

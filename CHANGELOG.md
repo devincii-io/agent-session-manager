@@ -4,6 +4,52 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] — 2026-08-20
+
+3.0.0 called every prompt a "goal". That was the wrong word for the wrong thing.
+A **goal** is Claude Code's `/goal` — a session-scoped Stop hook that blocks the
+agent from finishing until its condition holds. This release tracks the real
+one, and measures what happened while it ran.
+
+### Added
+- **Goal runs**, reconstructed from the transcript's own `goal_status`
+  attachments: when the goal was set, every time the Stop hook refused to let
+  the agent finish (with its reasoning), and the moment the condition was
+  finally met. A goal that was replaced by a later one is kept and marked
+  replaced; one that was still active when the transcript ended is measured and
+  marked open, never quietly closed.
+- **Goal analysis** — how long it ran, the follow-ups you sent while it was
+  running, turns, tool calls, time inside tools, errors, compactions, tokens
+  and the price estimate. Opening a goal shows everything that happened inside
+  it: every tool call in order, each prompt you sent, the files touched, the
+  commands run, and each blocked stop with the hook's reasoning.
+- **Time per kind of work.** Every tool call is timed from the call to its
+  result, and the legend now reads `shell 489 · 1h 22m` rather than a bare
+  count. Parallel calls of the same kind are counted once — three greps at the
+  same time are not three grep-minutes — so the figures are wall clock, not a
+  sum of durations.
+- A **goal band** across the top of the timeline ribbon showing what was
+  running and for how long, with a tick at every blocked stop. Clicking a band
+  narrows the prompt list to that goal.
+- Sessions with no goal say so, and explain what `/goal` does, instead of
+  inventing goals out of prompts.
+
+### Changed
+- The per-prompt segments introduced in 3.0.0 are now called **prompts** and
+  are subordinate to goals, which is what they always were.
+- Work is attributed to a goal as it happens rather than by matching timestamps
+  afterwards. The old approach charged a long-running prompt to whichever goal
+  contained its *start*, which put nine hours of work under a goal that lasted
+  forty-four seconds.
+
+### Fixed
+- The Stop-hook directive Claude Code injects into the user role no longer
+  appears as something you typed — it is the goal, and it is shown as one.
+- `<task-notification>` blocks are recognised as CLI scaffolding, so background
+  task results no longer appear in the prompt list.
+- The timeline's hover readout is no longer clipped by the ribbon's own edge;
+  it overhangs the box and flips above the row only when the window demands it.
+
 ## [3.0.0] — 2026-08-20
 
 A session is not a wall of messages. It is a sequence of things you asked for,

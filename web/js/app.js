@@ -426,6 +426,7 @@
       (detail.usage || {}).total || 0,
       ((detail.scratchpad && detail.scratchpad.files) || []).length,
       (detail.goals && detail.goals.count) || 0,
+      (detail.requests && detail.requests.count) || 0,
     ].join(":");
   }
 
@@ -449,6 +450,7 @@
     State.sessionId = sessionId;
     State.view = "session";
     State.goalIndex = null;
+    State.promptIndex = null;
     if (!["journey", "analytics", "transcript", "subagents", "tasks", "workspace", "images", "raw"].includes(State.tab)) {
       State.tab = "journey";
     }

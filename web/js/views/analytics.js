@@ -61,6 +61,7 @@
     const provider = ASM.scope.currentProvider();
     const costKnown = provider !== "codex";
     const goals = detail.goals || {};
+    const requests = detail.requests || {};
 
     const models = Object.entries(byModel)
       .filter(([name, value]) => name !== "unknown" && name !== "<synthetic>" && (value.total || 0) > 0)
@@ -122,15 +123,18 @@
           { tip: "How much generated text was reasoning rather than a visible reply" })}
       </div>
 
-      ${goals.count ? ui.section("Work mix", `<div class="card">
-        ${ui.stackBar(goals.by_cat, { tall: true })}
-        <div style="margin-top:10px">${ui.categoryLegend(goals.by_cat)}</div>
+      ${requests.count ? ui.section("Work mix", `<div class="card">
+        ${ui.stackBar(requests.by_cat, { tall: true })}
+        <div style="margin-top:10px">${ui.categoryLegend(requests.by_cat, { ms: requests.cat_ms })}</div>
         <div class="faint" style="font-size:11.5px;margin-top:8px">
-          ${goals.count} goal${goals.count === 1 ? "" : "s"} · median ${fmt.duration(goals.median_ms)} ·
-          ${goals.questions} question${goals.questions === 1 ? "" : "s"} back to you ·
-          ${goals.failed} goal${goals.failed === 1 ? "" : "s"} dominated by failing tools.
+          ${requests.count} prompt${requests.count === 1 ? "" : "s"} ·
+          ${requests.tool_ms ? `${fmt.duration(requests.tool_ms)} inside tool calls · ` : ""}
+          ${goals.count ? `${goals.count} goal${goals.count === 1 ? "" : "s"} set · ` : ""}
+          ${requests.questions} time${requests.questions === 1 ? "" : "s"} the agent asked you something.
           <button class="link-btn" data-action="tab" data-tab="journey">Open the Journey view</button>
-        </div></div>`, { desc: "Every tool call in this session, grouped by the kind of work it was." }) : ""}
+        </div></div>`, {
+        desc: "Every tool call in this session, grouped by the kind of work it was. Times are wall clock with parallel calls counted once, so they do not add up to the session length.",
+      }) : ""}
 
       ${ui.section("Token composition", `<div class="card">${ui.barList([
         { label: "Input", value: usage.input || 0, valueText: fmt.tokens(usage.input), color: "var(--cat-read)" },

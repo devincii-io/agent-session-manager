@@ -1,4 +1,4 @@
-"""Goal segmentation: the arc of a session, reconstructed from its transcript."""
+"""The arc of a session: /goal runs, and the prompts that ran inside them."""
 
 from __future__ import annotations
 
@@ -83,14 +83,14 @@ class PromptClassificationTests(unittest.TestCase):
         self.assertEqual(text, "fix the parser")
 
 
-class ClaudeGoalTests(unittest.TestCase):
+class ClaudeRequestTests(unittest.TestCase):
     def build(self, records: list[dict]) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "session.jsonl"
             write_jsonl(path, records)
-            return session_parser.detail(path)["goals"]
+            return session_parser.detail(path)["requests"]
 
-    def test_one_goal_per_prompt_and_tool_results_do_not_start_one(self) -> None:
+    def test_one_request_per_prompt_and_tool_results_do_not_start_one(self) -> None:
         result = self.build([
             user("first request", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:05.000Z", [tool_use("Read", "t1", file_path="/a/b.py")], message_id="m1"),
@@ -101,24 +101,24 @@ class ClaudeGoalTests(unittest.TestCase):
             tool_result("t2", "2026-08-01T10:05:40.000Z"),
         ])
         self.assertEqual(result["count"], 2)
-        first, second = result["goals"]
+        first, second = result["requests"]
         self.assertEqual(first["prompt"], "first request")
         self.assertEqual(first["by_cat"], {"read": 1})
         self.assertEqual(first["turns"], 2)
         self.assertEqual(second["by_cat"], {"exec": 1})
         self.assertEqual(second["commands"], ["pytest"])
 
-    def test_a_goal_measures_from_its_prompt_to_the_next_one(self) -> None:
+    def test_a_request_measures_from_its_prompt_to_the_next_one(self) -> None:
         result = self.build([
             user("go", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:04.000Z", [{"type": "text", "text": "ok"}], message_id="m1"),
             assistant("2026-08-01T10:02:00.000Z", [{"type": "text", "text": "still going"}], message_id="m2"),
         ])
-        goal = result["goals"][0]
-        self.assertEqual(goal["ms"], 120_000)
-        self.assertEqual(goal["latency_ms"], 4_000)
+        request = result["requests"][0]
+        self.assertEqual(request["ms"], 120_000)
+        self.assertEqual(request["latency_ms"], 4_000)
 
-    def test_a_failing_tool_is_charged_to_the_goal_that_called_it(self) -> None:
+    def test_a_failing_tool_is_charged_to_the_request_that_called_it(self) -> None:
         result = self.build([
             user("build it", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:02.000Z", [tool_use("Bash", "t1", command="make")], message_id="m1"),
@@ -126,24 +126,24 @@ class ClaudeGoalTests(unittest.TestCase):
             user("never mind", "2026-08-01T10:00:03.000Z"),
             tool_result("t1", "2026-08-01T10:00:05.000Z", error=True),
         ])
-        first, second = result["goals"]
+        first, second = result["requests"]
         self.assertEqual(first["errors"], 1)
         self.assertEqual(second["errors"], 0)
         self.assertEqual(first["error_names"], {"Bash": 1})
         self.assertTrue(first["steps"][0]["e"])
 
-    def test_a_question_marks_the_goal_and_the_session(self) -> None:
+    def test_a_question_marks_the_request_and_the_session(self) -> None:
         result = self.build([
             user("which one?", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:02.000Z", [tool_use("AskUserQuestion", "t1")], message_id="m1"),
             tool_result("t1", "2026-08-01T10:00:20.000Z"),
         ])
-        goal = result["goals"][0]
-        self.assertTrue(goal["asked"])
-        self.assertEqual(goal["outcome"], "question")
+        request = result["requests"][0]
+        self.assertTrue(request["asked"])
+        self.assertEqual(request["outcome"], "question")
         self.assertEqual(result["questions"], 1)
 
-    def test_a_goal_dominated_by_failures_is_reported_as_failed(self) -> None:
+    def test_a_request_dominated_by_failures_is_reported_as_failed(self) -> None:
         records = [user("do the thing", "2026-08-01T10:00:00.000Z")]
         for index in range(3):
             call = f"t{index}"
@@ -151,56 +151,56 @@ class ClaudeGoalTests(unittest.TestCase):
                                      [tool_use("Bash", call, command="make")], message_id=f"m{index}"))
             records.append(tool_result(call, f"2026-08-01T10:00:1{index}.000Z", error=True))
         result = self.build(records)
-        self.assertEqual(result["goals"][0]["outcome"], "error")
+        self.assertEqual(result["requests"][0]["outcome"], "error")
         self.assertEqual(result["failed"], 1)
 
-    def test_cli_scaffolding_does_not_create_a_goal(self) -> None:
+    def test_cli_scaffolding_does_not_create_a_request(self) -> None:
         result = self.build([
             user("<system-reminder>context</system-reminder>", "2026-08-01T10:00:00.000Z"),
             user("real request", "2026-08-01T10:00:01.000Z"),
             assistant("2026-08-01T10:00:02.000Z", [tool_use("Read", "t1", file_path="/x")], message_id="m1"),
         ])
-        self.assertEqual([goal["prompt"] for goal in result["goals"]], ["real request"])
+        self.assertEqual([request["prompt"] for request in result["requests"]], ["real request"])
 
     def test_work_before_the_first_prompt_is_kept_and_labelled(self) -> None:
         result = self.build([
             assistant("2026-08-01T10:00:00.000Z", [tool_use("Read", "t1", file_path="/x")], message_id="m1"),
             user("now do this", "2026-08-01T10:00:10.000Z"),
         ])
-        self.assertEqual(result["goals"][0]["kind"], "implicit")
-        self.assertEqual(result["goals"][0]["by_cat"], {"read": 1})
+        self.assertEqual(result["requests"][0]["kind"], "implicit")
+        self.assertEqual(result["requests"][0]["by_cat"], {"read": 1})
 
     def test_the_payload_is_bounded_no_matter_how_long_the_session_is(self) -> None:
         records = []
-        for index in range(goals.MAX_GOALS + 40):
+        for index in range(goals.MAX_REQUESTS + 40):
             stamp = f"2026-08-01T10:{index // 60:02d}:{index % 60:02d}.000Z"
             records.append(user(f"request {index}", stamp))
         result = self.build(records)
-        self.assertEqual(len(result["goals"]), goals.MAX_GOALS)
+        self.assertEqual(len(result["requests"]), goals.MAX_REQUESTS)
         self.assertEqual(result["dropped"], 40)
-        self.assertEqual(result["count"], goals.MAX_GOALS + 40)
+        self.assertEqual(result["count"], goals.MAX_REQUESTS + 40)
         # The newest goals are the ones kept.
-        self.assertEqual(result["goals"][-1]["prompt"], f"request {goals.MAX_GOALS + 39}")
+        self.assertEqual(result["requests"][-1]["prompt"], f"request {goals.MAX_REQUESTS + 39}")
 
-    def test_steps_are_capped_per_goal_and_the_overflow_is_reported(self) -> None:
+    def test_steps_are_capped_per_request_and_the_overflow_is_reported(self) -> None:
         records = [user("churn", "2026-08-01T10:00:00.000Z")]
         for index in range(goals.MAX_STEPS + 12):
             records.append(assistant("2026-08-01T10:00:01.000Z",
                                      [tool_use("Read", f"t{index}", file_path="/x")], message_id=f"m{index}"))
-        goal = self.build(records)["goals"][0]
-        self.assertEqual(len(goal["steps"]), goals.MAX_STEPS)
-        self.assertEqual(goal["dropped_steps"], 12)
-        self.assertEqual(goal["tools"], goals.MAX_STEPS + 12)
+        request = self.build(records)["requests"][0]
+        self.assertEqual(len(request["steps"]), goals.MAX_STEPS)
+        self.assertEqual(request["dropped_steps"], 12)
+        self.assertEqual(request["tools"], goals.MAX_STEPS + 12)
 
-    def test_claude_goals_carry_a_price_estimate(self) -> None:
+    def test_claude_requests_carry_a_price_estimate(self) -> None:
         result = self.build([
             user("spend something", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:02.000Z", [{"type": "text", "text": "ok"}], message_id="m1"),
         ])
         self.assertTrue(result["priced"])
-        self.assertGreater(result["goals"][0]["cost"], 0)
+        self.assertGreater(result["requests"][0]["cost"], 0)
 
-    def test_incremental_feeding_produces_the_same_goals_as_one_pass(self) -> None:
+    def test_incremental_feeding_produces_the_same_arc_as_one_pass(self) -> None:
         records = [
             user("first", "2026-08-01T10:00:00.000Z"),
             assistant("2026-08-01T10:00:02.000Z", [tool_use("Read", "t1", file_path="/x")], message_id="m1"),
@@ -220,17 +220,18 @@ class ClaudeGoalTests(unittest.TestCase):
         for record in records[3:]:
             streamed.feed(record)
 
+        self.assertEqual(whole.meta()["requests"], streamed.meta()["requests"])
         self.assertEqual(whole.meta()["goals"], streamed.meta()["goals"])
 
 
-class CodexGoalTests(unittest.TestCase):
+class CodexRequestTests(unittest.TestCase):
     def build(self, records: list[dict]) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout.jsonl"
             write_jsonl(path, records)
-            return codex_session_parser.detail(path)["goals"]
+            return codex_session_parser.detail(path)["requests"]
 
-    def test_codex_goals_are_segmented_but_never_priced(self) -> None:
+    def test_codex_requests_are_segmented_but_never_priced(self) -> None:
         result = self.build([
             {"timestamp": "2026-08-01T10:00:00.000Z", "type": "session_meta",
              "payload": {"id": "s1", "cwd": "/repo", "context_window": 400000}},
@@ -246,20 +247,20 @@ class CodexGoalTests(unittest.TestCase):
         ])
         self.assertFalse(result["priced"])
         self.assertEqual(result["count"], 1)
-        goal = result["goals"][0]
-        self.assertEqual(goal["prompt"], "make it work")
-        self.assertEqual(goal["by_cat"], {"exec": 1})
-        self.assertEqual(goal["cost"], 0.0)
-        self.assertEqual(goal["tokens"], 5000)
+        request = result["requests"][0]
+        self.assertEqual(request["prompt"], "make it work")
+        self.assertEqual(request["by_cat"], {"exec": 1})
+        self.assertEqual(request["cost"], 0.0)
+        self.assertEqual(request["tokens"], 5000)
 
-    def test_codex_scaffolding_does_not_open_a_goal(self) -> None:
+    def test_codex_scaffolding_does_not_open_a_request(self) -> None:
         result = self.build([
             {"timestamp": "2026-08-01T10:00:00.000Z", "type": "event_msg",
              "payload": {"type": "user_message", "message": "<recommended_plugins>a list</recommended_plugins>"}},
             {"timestamp": "2026-08-01T10:00:01.000Z", "type": "event_msg",
              "payload": {"type": "user_message", "message": "an actual request"}},
         ])
-        self.assertEqual([goal["prompt"] for goal in result["goals"]], ["an actual request"])
+        self.assertEqual([request["prompt"] for request in result["requests"]], ["an actual request"])
 
 
 if __name__ == "__main__":
