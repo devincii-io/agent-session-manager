@@ -1,0 +1,111 @@
+/* ============================================================
+   Chart chrome. The geometry is drawn by js/ui/charts.js as inline
+   SVG; this file owns everything around it — axes, grid, tooltips,
+   the calendar grid and the heatmap — so the charts stay theme-aware
+   without any colour being written in JavaScript.
+   ============================================================ */
+
+.chart { position: relative; width: 100%; min-width: 0; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .grid-line { stroke: var(--line); stroke-width: 1; }
+.chart .axis-text { fill: var(--fg-faint); font-family: var(--mono); font-size: 9.5px; }
+.chart .axis-label { fill: var(--fg-faint); font-size: 10px; }
+.chart .series-line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
+.chart .series-dot { stroke: var(--surface); stroke-width: 1.5; }
+.chart .col { transition: opacity .12s; }
+.chart .col:hover { opacity: 1 !important; }
+.chart .marker-line { stroke: var(--fg-faint); stroke-width: 1; stroke-dasharray: 3 3; }
+
+.chart-empty { padding: 22px 4px; font-size: 12px; color: var(--fg-faint); text-align: center; }
+
+/* Hover readout shared by every chart that has one. */
+.chart-tip {
+  position: absolute; z-index: 12; pointer-events: none;
+  background: var(--boost); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-1);
+  padding: 6px 9px; font-size: 11.5px; white-space: nowrap;
+  transform: translate(-50%, -100%); margin-top: -8px;
+}
+.chart-tip b { font-family: var(--mono); }
+.chart-tip[hidden] { display: none; }
+
+/* ---------- donut ---------- */
+
+.donut-wrap { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; }
+.donut { position: relative; flex: none; }
+.donut .ring-track { stroke: var(--panel); }
+.donut .donut-center {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; pointer-events: none;
+}
+.donut .dc-value { font-size: 15px; font-weight: 640; letter-spacing: -0.3px; }
+.donut .dc-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--fg-faint); }
+
+/* ---------- stacked composition bar ---------- */
+
+.stack {
+  display: flex; height: 10px; border-radius: 3px; overflow: hidden;
+  background: var(--panel); min-width: 0;
+}
+.stack.tall { height: 14px; border-radius: 4px; }
+.stack .seg { height: 100%; min-width: 1px; }
+.stack .seg:hover { filter: brightness(1.25); }
+
+/* ---------- calendar / contribution grid ---------- */
+
+.calendar-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cal-months { display: flex; gap: 4px; padding-left: 1px; }
+.cal-month {
+  flex: 0 0 14px; font-size: 9.5px; color: var(--fg-faint);
+  font-family: var(--mono); white-space: nowrap; overflow: visible;
+}
+.calendar { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
+.cal-week { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.cal-day {
+  width: 14px; height: 14px; border-radius: 3px;
+  background: var(--panel); cursor: default;
+}
+.cal-day[data-level="1"] { background: color-mix(in srgb, var(--accent) 28%, var(--panel)); }
+.cal-day[data-level="2"] { background: color-mix(in srgb, var(--accent) 52%, var(--panel)); }
+.cal-day[data-level="3"] { background: color-mix(in srgb, var(--accent) 76%, var(--panel)); }
+.cal-day[data-level="4"] { background: var(--accent); }
+.cal-legend {
+  display: flex; align-items: center; gap: 5px; margin-top: 4px;
+  font-size: 10.5px; color: var(--fg-faint);
+}
+.cal-legend .cal-day { width: 10px; height: 10px; }
+
+/* ---------- weekday x hour heatmap ---------- */
+
+.heat { display: grid; grid-template-columns: 26px repeat(24, 1fr); gap: 2px; min-width: 0; }
+.heat .h-label { font-size: 9.5px; color: var(--fg-faint); display: flex; align-items: center; font-family: var(--mono); }
+.heat .h-hour { font-size: 8.5px; color: var(--fg-faint); text-align: center; font-family: var(--mono); }
+.heat .h-cell { aspect-ratio: 1; border-radius: 2px; background: var(--panel); min-width: 0; }
+.heat .h-cell[data-level="1"] { background: color-mix(in srgb, var(--primary) 26%, var(--panel)); }
+.heat .h-cell[data-level="2"] { background: color-mix(in srgb, var(--primary) 48%, var(--panel)); }
+.heat .h-cell[data-level="3"] { background: color-mix(in srgb, var(--primary) 72%, var(--panel)); }
+.heat .h-cell[data-level="4"] { background: var(--primary); }
+
+/* ---------- category colours, shared by every chart ---------- */
+
+.c-read { color: var(--cat-read); }
+.c-search { color: var(--cat-search); }
+.c-edit { color: var(--cat-edit); }
+.c-exec { color: var(--cat-exec); }
+.c-web { color: var(--cat-web); }
+.c-agent { color: var(--cat-agent); }
+.c-plan { color: var(--cat-plan); }
+.c-ask { color: var(--cat-ask); }
+.c-mcp { color: var(--cat-mcp); }
+.c-other { color: var(--cat-other); }
+
+.bg-read { background: var(--cat-read); }
+.bg-search { background: var(--cat-search); }
+.bg-edit { background: var(--cat-edit); }
+.bg-exec { background: var(--cat-exec); }
+.bg-web { background: var(--cat-web); }
+.bg-agent { background: var(--cat-agent); }
+.bg-plan { background: var(--cat-plan); }
+.bg-ask { background: var(--cat-ask); }
+.bg-mcp { background: var(--cat-mcp); }
+.bg-other { background: var(--cat-other); }

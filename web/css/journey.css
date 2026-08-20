@@ -1,0 +1,164 @@
+/* ============================================================
+   The Journey view — a session as the arc of the work rather than
+   a wall of messages.
+
+   Three parts, top to bottom:
+     .jn-ribbon   one row per goal on a shared clock, drawn to a
+                  canvas because a dense session is tens of thousands
+                  of marks and a DOM node each would crawl;
+     .jn-list     the same goals as rows you can read and click;
+     .jn-detail   everything about the goal you selected.
+
+   Colour comes entirely from the --cat-* and --out-* tokens; the
+   canvas reads them back through getComputedStyle so a theme switch
+   repaints correctly instead of freezing yesterday's palette in.
+   ============================================================ */
+
+.journey { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+/* ---------- legend ---------- */
+
+.jn-legend { display: flex; flex-wrap: wrap; gap: 5px 8px; align-items: center; }
+.jn-cat {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; font-size: 11px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--fg-dim);
+}
+.jn-cat:hover { color: var(--fg); background: var(--boost); }
+.jn-cat.off { opacity: .38; }
+.jn-cat .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.jn-cat b { color: var(--fg); font-family: var(--mono); font-size: 10.5px; font-weight: 600; }
+
+/* ---------- ribbon ---------- */
+
+.jn-ribbon {
+  position: relative; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); overflow: hidden; user-select: none;
+}
+.jn-ribbon-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  font-size: 11px; color: var(--fg-faint);
+}
+.jn-ribbon-head .jrh-title { color: var(--fg-dim); font-weight: 600; }
+.jn-ribbon-head .jrh-hint { margin-left: auto; font-size: 10.5px; }
+
+.jn-canvas-wrap { position: relative; }
+.jn-canvas-wrap canvas { display: block; width: 100%; cursor: crosshair; }
+.jn-canvas-wrap canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The floating readout. Positioned by script; styled only here. */
+.jn-hover {
+  position: absolute; z-index: 14; pointer-events: none;
+  width: min(320px, calc(100% - 16px));
+  background: var(--boost); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-1);
+  padding: 8px 10px; font-size: 11.5px;
+}
+.jn-hover[hidden] { display: none; }
+.jn-hover .jh-head { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+.jn-hover .jh-idx { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); }
+.jn-hover .jh-prompt {
+  color: var(--fg); line-height: 1.4; max-height: 42px; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.jn-hover .jh-stats {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; padding-top: 5px;
+  border-top: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px;
+  color: var(--fg-faint);
+}
+.jn-hover .jh-stats b { color: var(--fg-dim); }
+
+/* ---------- goal list ---------- */
+
+.jn-split { display: flex; gap: 14px; align-items: flex-start; min-width: 0; }
+.jn-list-col { flex: 1 1 58%; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.jn-detail-col { flex: 1 1 42%; min-width: 0; position: sticky; top: 8px; }
+
+.jn-list {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); overflow: hidden;
+}
+.jn-goal {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 11px; border-bottom: 1px solid var(--line);
+  cursor: pointer; min-width: 0;
+}
+.jn-list .jn-goal:last-child { border-bottom: none; }
+.jn-goal:hover { background: var(--panel); }
+.jn-goal.active { background: var(--boost); box-shadow: inset 2px 0 0 var(--accent); }
+
+.jn-goal .jg-num {
+  flex: none; width: 26px; text-align: right; font-family: var(--mono);
+  font-size: 10.5px; color: var(--fg-faint);
+}
+.jn-goal .jg-outcome { flex: none; width: 7px; height: 26px; border-radius: 2px; background: var(--out-empty); }
+.jn-goal[data-outcome="done"] .jg-outcome { background: var(--out-done); }
+.jn-goal[data-outcome="recovered"] .jg-outcome { background: var(--out-recovered); }
+.jn-goal[data-outcome="error"] .jg-outcome { background: var(--out-error); }
+.jn-goal[data-outcome="question"] .jg-outcome { background: var(--out-question); }
+
+.jn-goal .jg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.jn-goal .jg-prompt {
+  display: block; font-size: 12.5px; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.jn-goal[data-kind="command"] .jg-prompt { font-family: var(--mono); font-size: 11.5px; color: var(--cat-plan); }
+.jn-goal .jg-meta {
+  display: flex; align-items: center; gap: 9px; font-size: 10.5px;
+  color: var(--fg-faint); font-family: var(--mono); min-width: 0;
+}
+.jn-goal .jg-stack { width: 100%; }
+.jn-goal .jg-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.jn-goal .jg-dur { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+
+/* ---------- goal inspector ---------- */
+
+.jn-detail {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); overflow: hidden;
+}
+.jn-detail-head { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.jn-detail-head .jd-eyebrow {
+  font-size: 10px; letter-spacing: .8px; text-transform: uppercase;
+  color: var(--fg-faint); display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+}
+.jn-detail-head .jd-prompt {
+  font-size: 13px; line-height: 1.5; color: var(--fg);
+  max-height: 8.5em; overflow-y: auto;
+}
+.jn-detail-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 13px; }
+
+.jn-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; }
+.jn-fact { background: var(--panel); border-radius: var(--radius-sm); padding: 7px 9px; min-width: 0; }
+.jn-fact .jf-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-faint); }
+.jn-fact .jf-value { font-size: 14px; font-weight: 620; letter-spacing: -0.2px; }
+.jn-fact.warn .jf-value { color: var(--warning); }
+.jn-fact.bad .jf-value { color: var(--error); }
+
+/* The step strip: every tool call in this goal, in order, as one tick
+   each. Wraps freely — 240 ticks in a dense goal still read as texture. */
+.jn-steps { display: flex; flex-wrap: wrap; gap: 3px; }
+.jn-step {
+  width: 12px; height: 12px; border-radius: 3px; flex: none;
+  position: relative; cursor: default;
+}
+.jn-step.err { box-shadow: inset 0 0 0 1.5px var(--error); }
+.jn-step.err::after {
+  content: ""; position: absolute; inset: 3px; border-radius: 1px; background: var(--error);
+}
+
+.jn-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.jn-chip {
+  font-family: var(--mono); font-size: 10.5px; padding: 2px 7px;
+  border-radius: 4px; background: var(--panel); color: var(--fg-dim);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jn-chip.err { color: var(--error); background: var(--error-soft); }
+
+/* ---------- narrow ---------- */
+
+@container main (max-width: 760px) {
+  .jn-split { flex-direction: column; }
+  .jn-detail-col { flex: none; width: 100%; position: static; }
+}

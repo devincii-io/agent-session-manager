@@ -1,110 +1,135 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Agent Session Manager</title>
   <link rel="icon" type="image/svg+xml" href="icons/logo.svg" />
-  <link rel="stylesheet" href="styles.css" />
+  <!-- Tokens first: every later stylesheet resolves its colours from them. -->
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/charts.css" />
+  <link rel="stylesheet" href="css/journey.css" />
+  <link rel="stylesheet" href="css/views.css" />
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 <body>
   <div id="app">
     <header class="topbar" role="banner">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">ASM</span>
-        <span class="brand-name">Session Manager</span>
-      </div>
-      <label class="top-select view-picker" title="Choose a workspace view">
-        <span>View</span>
-        <select id="view-switch" aria-label="View">
-          <option value="overview">Overview</option>
-          <option value="sessions">Sessions</option>
-          <option value="monitor">Monitor</option>
-          <option value="cleanup">Cleanup</option>
-          <option value="tune">Instructions</option>
-          <option value="settings">Settings</option>
-        </select>
-      </label>
-      <label class="top-select agent-picker" title="Filter sessions by agent">
-        <span>Agent</span>
-        <select id="agent-switch" aria-label="Agent">
-          <option value="all">All agents</option>
-          <option value="claude">Claude</option>
-          <option value="codex">Codex</option>
-        </select>
-      </label>
-      <label class="top-select source-picker" title="Environment to scan. WSL sources are opt-in for faster refreshes.">
-        <span>Env</span>
-        <select id="source-switch" aria-label="Environment"><option value="windows">Windows</option></select>
-      </label>
-      <label class="top-select project-picker" title="Filter by project or open its sessions">
-        <span>Project</span>
-        <select id="project-switch" aria-label="Project"><option value="">All projects</option></select>
-      </label>
-      <label class="top-select session-picker" title="Choose a session; type in Search to filter this list">
-        <span>Session</span>
-        <select id="session-switch" aria-label="Session" disabled><option value="">Choose a project</option></select>
-      </label>
-      <div class="search-wrap">
-        <span class="search-icon" aria-hidden="true">/</span>
-        <input id="search" type="text" placeholder="Search projects or sessions · Enter searches all history" aria-label="Search projects or sessions" autocomplete="off" spellcheck="false" />
-        <kbd class="input-hint">Ctrl F</kbd>
-      </div>
-      <button id="command-trigger" class="command-trigger" type="button" title="Open command launcher (Ctrl+K)">
-        <span>Commands</span><kbd>Ctrl K</kbd>
+      <button class="brand" data-action="nav" data-view="overview" title="Back to Overview">
+        <img class="brand-mark" src="icons/logo.svg" alt="" aria-hidden="true" />
+        <span class="brand-name">Session <span>Manager</span></span>
       </button>
-      <button class="top-new-session" type="button" data-action="launch-new" title="Start a new session in the selected or most recent project (Ctrl+N)">+ New</button>
-      <button id="help-trigger" class="icon-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-      <div class="topbar-right">
+
+      <nav id="view-rail" class="view-rail" aria-label="Views"></nav>
+
+      <div class="top-search">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input id="search" class="field" type="text" autocomplete="off" spellcheck="false"
+          placeholder="Filter sessions · Enter searches all"
+          aria-label="Filter sessions, or press Enter to search all history" />
+        <kbd>Ctrl F</kbd>
+      </div>
+
+      <select id="agent-switch" class="picker" aria-label="Agent" title="Which agent's sessions to show">
+        <option value="all">All agents</option>
+        <option value="claude">Claude</option>
+        <option value="codex">Codex</option>
+      </select>
+      <select id="source-switch" class="picker" aria-label="Environment"
+        title="Environment to scan. WSL sources are opt-in for faster refreshes.">
+        <option value="windows">Windows</option>
+      </select>
+
+      <div class="topbar-actions">
+        <button id="command-trigger" class="btn sm" type="button" title="Open the command launcher (Ctrl+K)">
+          Commands <kbd>Ctrl K</kbd></button>
+        <button class="btn sm primary" type="button" data-action="launch-new"
+          title="Start a new session in the selected or most recent project (Ctrl+N)">+ New</button>
         <div id="live-dot" class="live-dot" title="Watching local agent session data for changes">
-          <span class="pulse"></span> <span id="live-label">live</span>
-        </div>
-        <button id="refresh-btn" class="icon-btn" type="button" title="Refresh data (F5)" aria-label="Refresh">&#8635;</button>
+          <span class="pulse"></span><span id="live-label">live</span></div>
+        <button id="theme-toggle" class="icon-btn" type="button" title="Switch to the light theme"
+          aria-label="Toggle theme">☀</button>
+        <button id="refresh-btn" class="icon-btn" type="button" title="Refresh data (F5)" aria-label="Refresh">⟳</button>
+        <button id="help-trigger" class="icon-btn" type="button" title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts">?</button>
         <span class="window-divider" aria-hidden="true"></span>
-        <button id="win-min" class="icon-btn window-btn" type="button" title="Minimize window" aria-label="Minimize">&#8722;</button>
-        <button id="win-close" class="icon-btn window-btn win-close" type="button" title="Close window" aria-label="Close">&#215;</button>
+        <button id="win-min" class="icon-btn window-btn" type="button" title="Minimize" aria-label="Minimize">−</button>
+        <button id="win-close" class="icon-btn window-btn win-close" type="button" title="Close" aria-label="Close">×</button>
       </div>
     </header>
 
+    <div id="session-tabs" class="session-tabs" aria-label="Recently opened sessions"></div>
+
     <div class="body">
-      <section id="list-pane" class="list-pane" aria-label="Sessions"></section>
-      <div id="list-resizer" class="pane-resizer list-resizer" data-pane="list" role="separator"
-        aria-label="Resize session list" aria-orientation="vertical" aria-valuemin="240"
-        aria-valuemax="620" aria-valuenow="326" tabindex="0" hidden
-        title="Drag to resize session list · Double-click to reset"></div>
-      <main id="detail-pane" class="detail-pane"></main>
+      <aside id="sidebar" class="sidebar" aria-label="Session browser"></aside>
+      <div id="sidebar-grip" class="grip" role="separator" aria-orientation="vertical"
+        aria-label="Resize the session browser" aria-valuemin="220" aria-valuemax="520" aria-valuenow="300"
+        tabindex="0" title="Drag to resize · double-click to reset"></div>
+      <main id="main-pane" class="main-pane" tabindex="-1"></main>
     </div>
 
     <footer class="statusbar" aria-label="Application status">
       <span id="status-scope">All projects</span>
-      <span id="status-summary">Loading session index...</span>
-      <span class="status-spacer"></span>
+      <span id="status-summary">Loading the session index…</span>
+      <span class="spacer"></span>
       <button id="update-pill" class="update-pill" data-action="goto-update" hidden>Update available</button>
-      <button data-action="show-shortcuts">Keyboard shortcuts</button>
-      <span id="app-version">v2.0.4</span>
+      <button data-action="toggle-sidebar" title="Toggle the sidebar (Ctrl+B)">Sidebar</button>
+      <button data-action="show-shortcuts">Shortcuts</button>
+      <span id="app-version">v0.0.0</span>
     </footer>
   </div>
 
-  <div id="command-backdrop" class="palette-backdrop" hidden>
+  <div id="command-backdrop" class="backdrop" hidden>
     <section class="palette" role="dialog" aria-modal="true" aria-labelledby="palette-title">
       <div class="palette-input-row">
         <span class="prompt-mark" aria-hidden="true">&gt;</span>
-        <input id="command-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type a command, project, or session..." aria-label="Command launcher" />
+        <input id="command-input" type="text" autocomplete="off" spellcheck="false"
+          placeholder="Type a command, project, or session…" aria-label="Command launcher" />
         <kbd>Esc</kbd>
       </div>
-      <div class="palette-meta"><span id="palette-title">Command launcher</span><span>Enter to run · ↑↓ to navigate</span></div>
+      <div class="palette-meta">
+        <span id="palette-title">Command launcher</span>
+        <span>Enter to run · ↑↓ to navigate</span>
+      </div>
       <div id="command-results" class="command-results" role="listbox"></div>
     </section>
   </div>
 
-  <div id="shortcut-backdrop" class="palette-backdrop" hidden>
-    <section class="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
-      <div class="dialog-head"><div><div class="eyebrow">REFERENCE</div><h2 id="shortcut-title">Keyboard shortcuts</h2></div><button class="icon-btn" data-action="close-shortcuts" aria-label="Close">&#215;</button></div>
+  <div id="shortcut-backdrop" class="backdrop" hidden>
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
+      <div class="dialog-head">
+        <div><div class="eyebrow">Reference</div><h2 id="shortcut-title">Keyboard shortcuts</h2></div>
+        <button class="icon-btn" data-action="close-shortcuts" aria-label="Close">×</button>
+      </div>
       <div id="shortcut-grid" class="shortcut-grid"></div>
       <div class="dialog-foot">Shortcuts pause while you are editing text. Press <kbd>Esc</kbd> to close dialogs.</div>
     </section>
   </div>
-  <script src="app.js"></script>
+
+  <!-- Classic scripts, loaded in dependency order. Not ES modules: the page is
+       loaded from file:// inside QtWebEngine, where module fetches are subject
+       to CORS and would fail. Each file is an IIFE that extends window.ASM. -->
+  <script src="js/core/util.js"></script>
+  <script src="js/core/state.js"></script>
+  <script src="js/core/api.js"></script>
+  <script src="js/core/theme.js"></script>
+  <script src="js/ui/feedback.js"></script>
+  <script src="js/ui/components.js"></script>
+  <script src="js/ui/charts.js"></script>
+  <script src="js/views/journey.js"></script>
+  <script src="js/views/overview.js"></script>
+  <script src="js/views/sidebar.js"></script>
+  <script src="js/views/analytics.js"></script>
+  <script src="js/views/session.js"></script>
+  <script src="js/views/cleanup.js"></script>
+  <script src="js/views/settings.js"></script>
+  <script src="js/views/monitor.js"></script>
+  <script src="js/views/tune.js"></script>
+  <script src="js/views/misc.js"></script>
+  <script src="js/preview.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

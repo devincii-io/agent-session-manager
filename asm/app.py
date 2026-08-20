@@ -54,6 +54,9 @@ from .scanner import Scanner
 from .watcher import Watcher
 
 APP_NAME = "Agent Session Manager"
+# Matches --bg in web/css/tokens.css, so the window never flashes a
+# different colour before the page paints.
+APP_BACKGROUND = "#0e1015"
 
 
 def _close_splash() -> None:
@@ -124,7 +127,7 @@ class MainWindow(QMainWindow):
         self._bridge._window = self
 
         self._view = QWebEngineView(self)
-        self._view.page().setBackgroundColor(QColor("#1b1a17"))
+        self._view.page().setBackgroundColor(QColor(APP_BACKGROUND))
         ws = self._view.settings()
         ws.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
         ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
@@ -151,7 +154,12 @@ class MainWindow(QMainWindow):
                 QCoreApplication.exit(1)
                 return
             self._view.page().runJavaScript(
-                "(typeof State!=='undefined' && document.querySelector('#view-switch') && document.querySelector('#project-switch') && document.querySelector('#session-switch') && document.querySelector('.detail-pane')) ? 'RENDER_OK' : 'RENDER_FAIL'",
+                "(window.ASM && ASM.state && ASM.router && ASM.views.journey"
+                " && document.querySelector('#view-rail').children.length"
+                " && document.querySelector('#agent-switch')"
+                " && document.querySelector('#source-switch')"
+                " && document.querySelector('#sidebar')"
+                " && document.querySelector('#main-pane')) ? 'RENDER_OK' : 'RENDER_FAIL'",
                 lambda r: (print("SELFTEST:", r), QCoreApplication.exit(0 if r == "RENDER_OK" else 1)),
             )
 
@@ -168,8 +176,8 @@ def main() -> int:
     app.setWindowIcon(app_icon())
 
     palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window, QColor("#1b1a17"))
-    palette.setColor(QPalette.ColorRole.Base, QColor("#1b1a17"))
+    palette.setColor(QPalette.ColorRole.Window, QColor(APP_BACKGROUND))
+    palette.setColor(QPalette.ColorRole.Base, QColor(APP_BACKGROUND))
     app.setPalette(palette)
 
     window = MainWindow()

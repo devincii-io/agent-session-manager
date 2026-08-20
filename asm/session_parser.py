@@ -80,6 +80,7 @@ def iter_file_records(path: Path):
 # Shared helpers                                                               #
 # --------------------------------------------------------------------------- #
 
+from . import goals as goal_tracking  # noqa: E402
 from . import pricing  # noqa: E402
 
 
@@ -350,6 +351,8 @@ class DetailBuilder:
         self.by_model: dict[str, pricing.Usage] = {}
         self.tool_counts: Counter[str] = Counter()
         self.timeline: list[dict] = []
+        # the arc of the work: one segment per user prompt (see asm/goals.py)
+        self.goals = goal_tracking.GoalTracker()
         # analytics aggregates
         self.user_prompts = 0
         self.tool_errors: Counter[str] = Counter()
@@ -410,6 +413,7 @@ class DetailBuilder:
                 if btype == "tool_use":
                     name = b["name"]
                     self.tool_counts[name] += 1
+                    self.goals.tool(name, ts or "", b.get("id") or "")
                     if b.get("id"):
                         self._tool_id_name[b["id"]] = name
                     inp = raw.get("input") if isinstance(raw.get("input"), dict) else {}
@@ -417,10 +421,12 @@ class DetailBuilder:
                         fp = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
                         if fp:
                             self.files_touched[str(fp)] += 1
+                            self.goals.file(str(fp))
                     elif name == "Bash":
                         cmd = str(inp.get("command", "")).strip()
                         if cmd:
                             self.bash_commands[cmd.split()[0][:40]] += 1
+                            self.goals.command(cmd.split()[0][:40])
                     elif name in ("Agent", "Task", "Workflow"):
                         desc = inp.get("description") or inp.get("prompt") or ""
                         self.agent_calls.append({"name": name, "desc": str(desc)[:160], "ts": ts})
@@ -428,8 +434,10 @@ class DetailBuilder:
                             self.agent_calls.pop(0)
                 elif btype == "thinking":
                     self.thinking_chars += len(b.get("text", ""))
+                    self.goals.thinking(len(b.get("text", "")), ts or "")
                 elif btype == "text":
                     self.text_chars += len(b.get("text", ""))
+                    self.goals.text(len(b.get("text", "")), ts or "")
 
             msg_id = message.get("id") or rec.get("requestId")
             last = self.events[-1] if self.events else None
@@ -456,10 +464,12 @@ class DetailBuilder:
                 self.total.add(u)
                 self.by_model.setdefault(model or "unknown", pricing.Usage()).add(u)
                 self.output_per_turn.append(u.output)
+                self.goals.turn(ts or "", model or "", u)
                 ctx = _context_tokens(message)
                 if ctx:
                     if self._last_ctx and ctx < self._last_ctx * 0.65:
                         self.compactions += 1
+                        self.goals.compaction()
                     self._last_ctx = ctx
                     if ts:
                         cost = sum(pricing.cost_for(v, m) for m, v in self.by_model.items())
@@ -483,10 +493,16 @@ class DetailBuilder:
                             self.tool_error_total += 1
                             name = self._tool_id_name.get(b.get("tool_use_id") or "", "?")
                             self.tool_errors[name] += 1
+                            self.goals.tool_error(b.get("tool_use_id") or "", name)
             else:
                 blocks = []
             if not has_tool_result:
                 self.user_prompts += 1
+                if not is_side:
+                    prompt = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+                    self.goals.begin(prompt, ts or "")
+            else:
+                self.goals.touch(ts or "")
             event = {
                 "uuid": rec.get("uuid"),
                 "role": "user",
@@ -516,6 +532,7 @@ class DetailBuilder:
             "cost": round(sum(pricing.cost_for(u, m) for m, u in self.by_model.items()), 4),
             "tool_counts": dict(self.tool_counts.most_common()),
             "timeline": _downsample(self.timeline),
+            "goals": self.goals.result(),
             "analytics": {
                 "user_prompts": self.user_prompts,
                 "assistant_turns": len(self.seen_ids),

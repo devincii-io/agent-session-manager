@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import goals as goal_tracking
+from . import pricing
 from .session_parser import iter_file_records, read_new_lines
 
 TEXT_TRUNCATE = 8_000
@@ -46,8 +48,17 @@ def _text(value: Any) -> str:
 
 
 def _looks_internal(text: str) -> bool:
-    stripped = text.lstrip()
-    return stripped.startswith(("<environment_context>", "<INSTRUCTIONS>", "# AGENTS.md instructions"))
+    """CLI scaffolding that arrives in the user role but nobody typed.
+
+    Kept in step with ``asm.goals._NOISE_PREFIXES``; both exist because the
+    summary/transcript path and the goal path filter at different moments.
+    """
+    stripped = text.lstrip().lower()
+    return stripped.startswith((
+        "<environment_context", "<instructions", "<user_instructions",
+        "<recommended_plugins", "# agents.md instructions",
+        "# files mentioned by the user",
+    ))
 
 
 def _usage_snapshot(info: Any) -> tuple[dict, int]:
@@ -346,6 +357,10 @@ class DetailBuilder:
         self.last_ts = ""
         self.timeline: list[dict] = []
         self.output_per_turn: list[int] = []
+        # Codex tokens are cumulative snapshots and carry no billing meaning, so
+        # goals are tracked unpriced (see asm/goals.py).
+        self.goals = goal_tracking.GoalTracker(priced=False)
+        self._last_goal_total = 0
         self.agent_calls: list[dict] = []
         self.sidechain_events: list[dict] = []
         self.is_subagent = False
@@ -385,6 +400,8 @@ class DetailBuilder:
         clipped = clean[:TEXT_TRUNCATE]
         self._append("user", ts, [{"type": "text", "text": clipped, "truncated": len(clean) > TEXT_TRUNCATE}])
         self.user_prompts += 1
+        if not self.is_subagent:
+            self.goals.begin(clean, ts)
         self._last_user_text = clean
         self._last_was_user = True
 
@@ -393,11 +410,14 @@ class DetailBuilder:
             value = args.get(key)
             if isinstance(value, str) and value:
                 self.files_touched[value] += 1
+                self.goals.file(value)
         command = args.get("command")
         if not command and name in ("exec", "shell_command"):
             command = args.get("input")
         if isinstance(command, str) and command.strip():
-            self.bash_commands[command.strip().split()[0][:40]] += 1
+            head = command.strip().split()[0][:40]
+            self.bash_commands[head] += 1
+            self.goals.command(head)
 
     def feed(self, rec: dict) -> None:
         if not isinstance(rec, dict):
@@ -427,6 +447,7 @@ class DetailBuilder:
             return
         if rtype == "compacted" or ptype == "context_compacted":
             self.compactions += 1
+            self.goals.compaction()
             return
         if rtype == "event_msg":
             if ptype == "user_message":
@@ -436,6 +457,11 @@ class DetailBuilder:
                 info = payload.get("info") or {}
                 if isinstance(info, dict):
                     self.context_window = int(info.get("model_context_window") or self.context_window)
+                # Cumulative snapshots: the *delta* is what this goal spent.
+                spent = int(self.usage.get("total") or 0) - self._last_goal_total
+                if spent > 0:
+                    self._last_goal_total += spent
+                    self.goals.turn(ts, self.last_model, pricing.Usage(input=spent))
                 self.timeline.append({"t": ts, "ctx": self.last_context_tokens})
                 if len(self.timeline) > 300:
                     self.timeline.pop(0)
@@ -461,6 +487,7 @@ class DetailBuilder:
                 self._append("assistant", ts, [{"type": "text", "text": clipped, "truncated": len(text) > TEXT_TRUNCATE}], model=self.last_model)
                 self.assistant_turns += 1
                 self.text_chars += len(text)
+                self.goals.text(len(text), ts)
                 self._last_was_user = False
             return
 
@@ -473,6 +500,7 @@ class DetailBuilder:
                 clipped = text[:TEXT_TRUNCATE]
                 self._append("assistant", ts, [{"type": "thinking", "text": clipped, "truncated": len(text) > TEXT_TRUNCATE}], model=self.last_model)
                 self.thinking_chars += len(text)
+                self.goals.thinking(len(text), ts)
             self._last_was_user = False
             return
 
@@ -482,6 +510,7 @@ class DetailBuilder:
             preview, truncated = _preview(args)
             call_id = str(payload.get("call_id") or payload.get("id") or "")
             self.tool_counts[name] += 1
+            self.goals.tool(name, ts, call_id)
             if call_id:
                 self._tool_names[call_id] = name
             self._track_tool_input(name, args)
@@ -502,6 +531,7 @@ class DetailBuilder:
             is_error = _is_error_output(payload, preview)
             if is_error:
                 self.tool_errors[name] += 1
+                self.goals.tool_error(call_id, name)
             self._append("user", ts, [{
                 "type": "tool_result", "tool_use_id": call_id,
                 "content_preview": preview, "content_truncated": truncated,
@@ -524,6 +554,7 @@ class DetailBuilder:
             "cost_available": False,
             "tool_counts": dict(self.tool_counts.most_common()),
             "timeline": list(self.timeline),
+            "goals": self.goals.result(),
             "context_window": self.context_window,
             "last_context_tokens": self.last_context_tokens,
             "context_pct": round(100.0 * self.last_context_tokens / self.context_window, 1) if self.context_window else 0.0,

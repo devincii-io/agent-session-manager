@@ -393,11 +393,12 @@ class Bridge(QObject):
         by_model = {}
         tools: Counter = Counter()
         days: Counter = Counter()
+        heat = [[0] * 24 for _ in range(7)]
         result = {
             "provider": provider, "cost": 0.0,
             "cost_available": provider == "claude", "usage": usage,
             "by_model": by_model, "tool_counts": {}, "sessions_by_day": [],
-            "sources": [],
+            "activity": heat, "sources": [],
         }
         for source_id, agent, data in stats:
             result["sources"].append({"source_id": source_id, "provider": agent, "sessions": data.get("sessions", 0)})
@@ -412,10 +413,13 @@ class Bridge(QObject):
                 bucket["cost"] += float(values.get("cost", 0) or 0)
             tools.update(data.get("tool_counts", {}))
             days.update(dict(data.get("sessions_by_day", [])))
+            for row, source_row in zip(heat, data.get("activity") or []):
+                for hour, count in enumerate(source_row[:24]):
+                    row[hour] += int(count or 0)
             for key in ("sessions", "active", "prompts", "turns", "tool_calls", "subagent_sessions"):
                 result[key] = int(result.get(key, 0)) + int(data.get(key, 0) or 0)
-        result["tool_counts"] = dict(tools.most_common(14))
-        result["sessions_by_day"] = sorted(days.items())[-14:]
+        result["tool_counts"] = dict(tools.most_common(24))
+        result["sessions_by_day"] = sorted(days.items())[-90:]
         return _j(result)
 
     @Slot(result=str)

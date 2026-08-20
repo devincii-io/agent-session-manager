@@ -1,0 +1,147 @@
+/* ============================================================
+   Agent Session Manager — design tokens
+   ------------------------------------------------------------
+   Every colour, radius and font in the app resolves to something
+   declared here. Two themes are defined: the dark one on :root and
+   a light one under [data-theme="light"], which theme.js stamps on
+   the document element. Nothing below this file may hard-code a
+   colour — a literal hex in a component is a bug, because it will
+   be wrong in one of the two themes.
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* --- ground: four steps from the page to a raised control --- */
+  --bg: #0e1015;
+  --surface: #14171e;
+  --panel: #1b1f28;
+  --boost: #242a35;
+
+  /* --- ink --- */
+  --fg: #e6e9ef;
+  --fg-dim: color-mix(in srgb, var(--fg) 62%, transparent);
+  --fg-faint: color-mix(in srgb, var(--fg) 38%, transparent);
+  --line: color-mix(in srgb, var(--fg) 11%, transparent);
+  --line-strong: color-mix(in srgb, var(--fg) 20%, transparent);
+
+  /* --- meaning --- */
+  --primary: #e08a4b;   /* the app's own colour: actions, the live edge */
+  --accent: #6ea8fe;    /* selection, links, "this one" */
+  --success: #8ac97a;
+  --warning: #e0b64c;
+  --error: #e0736b;
+
+  --primary-soft: color-mix(in srgb, var(--primary) 16%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --error-soft: color-mix(in srgb, var(--error) 15%, transparent);
+  --success-soft: color-mix(in srgb, var(--success) 15%, transparent);
+
+  /* --- work categories ---------------------------------------
+     One colour per kind of thing an agent does. These are the most
+     load-bearing colours in the app: they key the journey lanes,
+     the per-goal bars and every tool legend, so the same hue always
+     means the same kind of work no matter which chart you are in. */
+  --cat-read: #6ea8fe;
+  --cat-search: #56c2b0;
+  --cat-edit: #8ac97a;
+  --cat-exec: #e0b64c;
+  --cat-web: #b98cc9;
+  --cat-agent: #e0894f;
+  --cat-plan: #93a2b5;
+  --cat-ask: #ea7a9b;
+  --cat-mcp: #6fd3e8;
+  --cat-other: #78828f;
+
+  /* --- outcomes: how a goal ended --- */
+  --out-done: var(--success);
+  --out-recovered: var(--warning);
+  --out-error: var(--error);
+  --out-question: var(--cat-ask);
+  --out-empty: var(--fg-faint);
+
+  /* --- chart series, in the order a chart consumes them --- */
+  --series-1: #6ea8fe;
+  --series-2: #e0894f;
+  --series-3: #8ac97a;
+  --series-4: #b98cc9;
+  --series-5: #e0b64c;
+  --series-6: #56c2b0;
+  --series-7: #ea7a9b;
+  --series-8: #93a2b5;
+
+  /* --- form --- */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+  --mono: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, "SF Mono", monospace;
+  --sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, Inter, sans-serif;
+
+  --shadow-1: 0 10px 30px color-mix(in srgb, #000 55%, transparent);
+  --shadow-2: 0 20px 60px color-mix(in srgb, #000 62%, transparent);
+  --scrim: color-mix(in srgb, #000 62%, transparent);
+
+  /* --- layout, owned by shell.css but resizable at runtime --- */
+  --sidebar-width: 300px;
+  --topbar-height: 46px;
+}
+
+/* ------------------------------------------------------------
+   Light theme.
+
+   A percentage of ink on paper is not the mirror of a percentage of
+   paper on ink, so none of the dark alphas are simply reused. Each
+   value below was re-aimed against --surface (the lightest ground
+   anything sits on, therefore the worst case) to clear 4.5:1 for
+   text and 3:1 for a boundary that carries meaning. The category
+   hues keep their hue and give up lightness — hue is what encodes
+   the meaning, so that is the part that must survive.
+   ------------------------------------------------------------ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --panel: #eef0f4;
+  --boost: #e2e6ec;
+
+  --fg: #171a20;
+  --fg-dim: color-mix(in srgb, var(--fg) 66%, transparent);
+  --fg-faint: color-mix(in srgb, var(--fg) 48%, transparent);
+  --line: color-mix(in srgb, var(--fg) 14%, transparent);
+  --line-strong: color-mix(in srgb, var(--fg) 26%, transparent);
+
+  --primary: #b15f1d;
+  --accent: #2d6ed4;
+  --success: #3f7f37;
+  --warning: #96700c;
+  --error: #c03d3d;
+
+  --cat-read: #2d6ed4;
+  --cat-search: #16786a;
+  --cat-edit: #3f7f37;
+  --cat-exec: #8a6608;
+  --cat-web: #7a4c9c;
+  --cat-agent: #a85c1c;
+  --cat-plan: #4d5b6d;
+  --cat-ask: #b03f68;
+  --cat-mcp: #17708a;
+  --cat-other: #59626e;
+
+  --series-1: #2d6ed4;
+  --series-2: #a85c1c;
+  --series-3: #3f7f37;
+  --series-4: #7a4c9c;
+  --series-5: #8a6608;
+  --series-6: #16786a;
+  --series-7: #b03f68;
+  --series-8: #4d5b6d;
+
+  --shadow-1:
+    0 2px 5px color-mix(in srgb, var(--fg) 8%, transparent),
+    0 8px 22px color-mix(in srgb, var(--fg) 10%, transparent);
+  --shadow-2:
+    0 3px 9px color-mix(in srgb, var(--fg) 9%, transparent),
+    0 14px 44px color-mix(in srgb, var(--fg) 14%, transparent);
+  --scrim: color-mix(in srgb, var(--fg) 34%, transparent);
+}

@@ -372,6 +372,7 @@ class CodexScanner:
                 "active": now - summary.mtime <= ACTIVE_WINDOW_SECONDS,
                 "protected": now - summary.mtime <= PROTECTED_WINDOW_SECONDS,
                 "has_subagents": summary.has_subagents,
+                "context_pct": summary.context_pct,
                 "child_session_count": len(self._child_summaries.get(summary.session_id, [])),
                 "models": list(summary.models),
                 "archived": summary.session_id in self._archived,
@@ -393,6 +394,8 @@ class CodexScanner:
         by_model: dict[str, dict] = {}
         tools: Counter[str] = Counter()
         days: Counter[str] = Counter()
+        # weekday x hour, in local time — the shape of when work actually happens
+        heat = [[0] * 24 for _ in range(7)]
         now = time.time()
         active = prompts = turns = tool_calls = subagent_sessions = 0
         for summary in self._visible_roots():
@@ -409,9 +412,11 @@ class CodexScanner:
                 _add_usage(bucket, model_usage)
             tools.update(summary.tool_counts)
             if summary.mtime:
-                days[time.strftime("%Y-%m-%d", time.localtime(summary.mtime))] += 1
+                local = time.localtime(summary.mtime)
+                days[time.strftime("%Y-%m-%d", local)] += 1
+                heat[local.tm_wday][local.tm_hour] += 1
         by_day = []
-        for offset in range(13, -1, -1):
+        for offset in range(89, -1, -1):
             day = time.strftime("%Y-%m-%d", time.localtime(now - offset * 86400))
             by_day.append([day, days.get(day, 0)])
         return {
@@ -426,8 +431,9 @@ class CodexScanner:
             "tool_calls": tool_calls,
             "subagent_sessions": subagent_sessions,
             "by_model": {model: {**item, "cost": 0.0, "cost_available": False} for model, item in by_model.items()},
-            "tool_counts": dict(tools.most_common(14)),
+            "tool_counts": dict(tools.most_common(24)),
             "sessions_by_day": by_day,
+            "activity": heat,
         }
 
     def search_all(self, query: str) -> dict:

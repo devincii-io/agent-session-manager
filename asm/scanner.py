@@ -28,6 +28,7 @@ from .session_parser import (
     read_new_lines,
 )
 
+DAY_HISTORY = 90          # calendar days of activity kept in global stats
 ACTIVE_WINDOW_SECONDS = 120  # a session whose jsonl changed this recently is "live"
 PROTECTED_WINDOW_SECONDS = 600  # conservative deletion guard for quiet tool/model runs
 CACHE_VERSION = 2  # bump when SessionSummary's schema or computation changes
@@ -199,6 +200,7 @@ class Scanner:
                         "active": now - s.mtime <= ACTIVE_WINDOW_SECONDS,
                         "protected": now - s.mtime <= PROTECTED_WINDOW_SECONDS,
                         "has_subagents": s.has_subagents,
+                        "context_pct": s.context_pct,
                         "models": [m for m in s.models if m != "<synthetic>"],
                     })
         self._save_cache()
@@ -569,6 +571,8 @@ class Scanner:
         days: Counter[str] = Counter()
         cost = 0.0
         sessions = active = prompts = turns = tool_calls = subagent_sessions = 0
+        # weekday x hour, in local time — the shape of when work actually happens
+        heat = [[0] * 24 for _ in range(7)]
         now = time.time()
         if root.is_dir():
             for pdir in root.iterdir():
@@ -599,11 +603,13 @@ class Scanner:
                     for name, c in (s.tool_counts or {}).items():
                         tools[name] += c
                     if s.mtime:
-                        days[time.strftime("%Y-%m-%d", time.localtime(s.mtime))] += 1
+                        local = time.localtime(s.mtime)
+                        days[time.strftime("%Y-%m-%d", local)] += 1
+                        heat[local.tm_wday][local.tm_hour] += 1
         self._save_cache()
-        # last 14 calendar days, zero-filled
+        # last 90 calendar days, zero-filled — the frontend slices what it needs
         by_day = []
-        for i in range(13, -1, -1):
+        for i in range(DAY_HISTORY - 1, -1, -1):
             d = time.strftime("%Y-%m-%d", time.localtime(now - i * 86400))
             by_day.append([d, days.get(d, 0)])
         usage_total = asdict(totals)
@@ -621,8 +627,9 @@ class Scanner:
                 m: {**asdict(u), "total": u.total, "cost": round(pricing.cost_for(u, m), 4)}
                 for m, u in by_model.items()
             },
-            "tool_counts": dict(tools.most_common(14)),
+            "tool_counts": dict(tools.most_common(24)),
             "sessions_by_day": by_day,
+            "activity": heat,
         }
 
     # -- global search ------------------------------------------------------- #

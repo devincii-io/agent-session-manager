@@ -1,0 +1,249 @@
+/* ============================================================
+   The shell: top bar, view rail, session tabs, sidebar browser,
+   main pane, resize grip and status bar. Layout only — the things
+   *inside* the panes are styled by components.css and views.css.
+   ============================================================ */
+
+#app { display: flex; flex-direction: column; }
+
+/* ---------- top bar ---------- */
+
+.topbar {
+  flex: none; height: var(--topbar-height);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 8px 0 12px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  min-width: 0;
+  -webkit-app-region: drag;
+}
+.topbar > * { -webkit-app-region: no-drag; }
+
+.brand { display: flex; align-items: center; gap: 8px; flex: none; padding: 3px 6px 3px 2px; border-radius: var(--radius-sm); }
+.brand:hover { background: var(--panel); }
+.brand-mark { width: 18px; height: 18px; display: block; }
+.brand-name { font-weight: 640; font-size: 13.5px; letter-spacing: -0.2px; }
+.brand-name span { color: var(--fg-faint); font-weight: 400; }
+
+/* The view rail: the app's six places, always one click away. */
+.view-rail { display: flex; gap: 2px; flex: none; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.view-rail::-webkit-scrollbar { height: 0; }
+.rail-btn {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  padding: 5px 11px; border-radius: var(--radius-sm);
+  color: var(--fg-faint); font-size: 12.5px; white-space: nowrap;
+}
+.rail-btn:hover { background: var(--panel); color: var(--fg); }
+.rail-btn.active { background: var(--boost); color: var(--fg); }
+.rail-btn .rb-glyph { font-size: 12px; line-height: 1; opacity: .85; }
+
+.top-search {
+  position: relative; flex: 1 1 260px; min-width: 120px; max-width: 460px;
+  display: flex; align-items: center;
+}
+.top-search .field { width: 100%; padding-left: 28px; padding-right: 54px; }
+.top-search .search-icon {
+  position: absolute; left: 9px; color: var(--fg-faint); font-size: 12px; pointer-events: none;
+}
+.top-search kbd { position: absolute; right: 8px; pointer-events: none; }
+
+.topbar-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
+.window-divider { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+
+/* The live indicator: steady while watching, warm while the disk moves. */
+.live-dot {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  padding: 3px 9px; border-radius: 999px; background: var(--panel);
+  font-size: 11px; color: var(--fg-faint); white-space: nowrap;
+}
+.live-dot .pulse {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--success);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent);
+}
+.live-dot.flash .pulse { background: var(--primary); animation: dot-pulse 1s ease-out infinite; }
+@keyframes dot-pulse {
+  to { box-shadow: 0 0 0 7px color-mix(in srgb, var(--primary) 0%, transparent); }
+}
+
+/* ---------- session tabs ---------- */
+
+/* Recently opened sessions, as tabs. Traversal is the point of this app,
+   so the last few sessions you looked at stay one click away — the strip
+   scrolls rather than pushing anything else off the bar. */
+.session-tabs {
+  flex: none; display: flex; align-items: center; gap: 2px;
+  padding: 4px 10px; min-height: 32px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  overflow-x: auto; scrollbar-width: none;
+}
+.session-tabs::-webkit-scrollbar { height: 0; }
+.session-tabs:empty, .session-tabs.hidden { display: none; }
+.session-tab {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  max-width: 230px; padding: 3px 8px 3px 10px; border-radius: var(--radius-sm);
+  color: var(--fg-dim); font-size: 12px;
+}
+.session-tab:hover { background: var(--panel); color: var(--fg); }
+.session-tab.active { background: var(--boost); color: var(--fg); }
+.session-tab .st-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--fg-faint); }
+.session-tab.claude .st-dot { background: var(--primary); }
+.session-tab.codex .st-dot { background: var(--cat-mcp); }
+.session-tab .st-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab .st-close { color: var(--fg-faint); font-size: 13px; line-height: 1; padding: 0 2px; border-radius: 3px; }
+.session-tab .st-close:hover { background: var(--line-strong); color: var(--fg); }
+
+/* ---------- body ---------- */
+
+.body { flex: 1; display: flex; min-height: 0; min-width: 0; }
+
+/* ---------- sidebar browser ---------- */
+
+.sidebar {
+  flex: 0 0 var(--sidebar-width); min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--surface); border-right: 1px solid var(--line);
+}
+.sidebar.collapsed { display: none; }
+
+.sb-head { flex: none; padding: 9px 10px 7px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 7px; }
+.sb-modes { display: flex; gap: 2px; }
+.sb-mode {
+  flex: 1; text-align: center; padding: 4px 6px; border-radius: var(--radius-sm);
+  font-size: 11.5px; color: var(--fg-faint);
+}
+.sb-mode:hover { background: var(--panel); color: var(--fg); }
+.sb-mode.active { background: var(--boost); color: var(--fg); }
+.sb-filters { display: flex; gap: 6px; align-items: center; }
+.sb-filters select.picker { flex: 1; font-size: 11.5px; padding: 4px 22px 4px 8px; }
+
+.sb-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px 0 20px; }
+
+.sb-group {
+  position: sticky; top: 0; z-index: 2;
+  padding: 8px 12px 4px;
+  font-size: 10px; letter-spacing: .8px; text-transform: uppercase;
+  color: var(--fg-faint);
+  background: linear-gradient(to bottom, var(--surface) 70%, transparent);
+}
+
+.sb-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 10px 6px 12px; cursor: pointer; min-width: 0;
+  border-left: 2px solid transparent;
+}
+.sb-row:hover { background: var(--panel); }
+.sb-row.active { background: var(--boost); border-left-color: var(--accent); }
+.sb-row.cursor { box-shadow: inset 0 0 0 1px var(--line-strong); }
+/* A flex column, so the inline <span>s inside are blockified and their
+   ellipsis actually applies — an inline element ignores text-overflow. */
+.sb-row .sb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sb-row .sb-title {
+  display: block; font-size: 12.5px; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.sb-row.dim .sb-title { color: var(--fg-dim); }
+.sb-row .sb-sub {
+  font-size: 11px; color: var(--fg-faint); display: flex; gap: 7px;
+  overflow: hidden; white-space: nowrap; margin-top: 1px;
+}
+.sb-row .sb-sub b { color: var(--fg-dim); font-weight: 600; }
+.sb-row .sb-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: 46%; }
+.sb-row .sb-when { font-size: 10.5px; color: var(--fg-faint); white-space: nowrap; }
+
+.sb-caret {
+  flex: none; width: 14px; text-align: center; color: var(--fg-faint);
+  font-size: 9px; transition: transform .12s;
+}
+.sb-row.open .sb-caret { transform: rotate(90deg); }
+
+.sb-empty { padding: 18px 14px; font-size: 12px; color: var(--fg-faint); }
+.sb-more {
+  display: block; width: calc(100% - 20px); margin: 8px 10px;
+  padding: 6px; border-radius: var(--radius-sm); border: 1px dashed var(--line-strong);
+  font-size: 11.5px; color: var(--fg-faint);
+}
+.sb-more:hover { background: var(--panel); color: var(--fg); }
+
+/* Session rows nested under an expanded project sit one step in. */
+.sb-row.nested { padding-left: 26px; }
+
+/* ---------- resize grip ---------- */
+
+.grip {
+  flex: 0 0 4px; cursor: col-resize; position: relative; background: transparent;
+  transition: background .12s;
+}
+.grip::after { content: ""; position: absolute; inset: 0 -3px; }
+.grip:hover, .grip[data-active] { background: var(--accent); }
+.grip:focus-visible { background: var(--accent); outline: none; }
+body.resizing { cursor: col-resize; user-select: none; }
+.sidebar.collapsed + .grip { display: none; }
+
+/* ---------- main pane ---------- */
+
+/* Container queries, not only media queries: the main pane's width is set by
+   the sidebar as much as by the window, so a layout that only watched the
+   viewport would stay wide while the pane itself was narrow. */
+.main-pane {
+  flex: 1; min-width: 0; min-height: 0; overflow-y: auto;
+  container: main / inline-size;
+  scroll-behavior: smooth;
+}
+.view {
+  max-width: none;
+  padding: 18px clamp(14px, 2.4vw, 28px) 40px;
+  display: flex; flex-direction: column; gap: 18px;
+}
+.view.flush { padding: 0; gap: 0; height: 100%; }
+
+/* ---------- page head ---------- */
+
+.page-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+}
+.page-head .ph-title { min-width: 0; }
+.page-head .ph-sub { color: var(--fg-dim); font-size: 12px; margin-top: 3px; }
+.page-head .ph-sub.mono { font-family: var(--mono); font-size: 11.5px; }
+.page-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------- status bar ---------- */
+
+.statusbar {
+  flex: none; height: 26px; display: flex; align-items: center; gap: 14px;
+  padding: 0 12px; background: var(--surface); border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--fg-faint); white-space: nowrap; overflow: hidden;
+}
+.statusbar button { font-size: 11px; color: var(--fg-faint); }
+.statusbar button:hover { color: var(--fg); }
+.update-pill {
+  padding: 1px 9px; border-radius: 999px;
+  background: var(--primary-soft); color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent);
+  font-size: 10.5px; font-weight: 600;
+}
+.update-pill:hover { background: var(--primary); color: #12100c; }
+
+/* ---------- responsive ---------- */
+
+@container main (max-width: 560px) {
+  .view { padding: 14px 12px 32px; gap: 14px; }
+  .page-head { flex-direction: column; gap: 10px; }
+}
+
+@media (max-width: 1000px) {
+  .top-search { flex-basis: 160px; }
+  .rail-btn .rb-label { display: none; }
+  .rail-btn { padding: 5px 9px; }
+}
+
+@media (max-width: 860px) {
+  /* Not enough room for both. The sidebar takes over when it is open and the
+     main pane takes the whole window when it is not. */
+  .sidebar { flex-basis: 100%; }
+  .sidebar:not(.collapsed) + .grip + .main-pane { display: none; }
+  .grip { display: none; }
+}
+
+/* Custom window controls only exist where the native ones are unreliable. */
+body:not(.custom-window-controls) .window-btn,
+body:not(.custom-window-controls) .window-divider { display: none; }
