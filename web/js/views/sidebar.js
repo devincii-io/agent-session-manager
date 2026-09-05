@@ -10,7 +10,9 @@
                into its own sessions
 
    Both render into one flat row list so a single pair of arrow keys
-   walks the whole thing regardless of which mode is on.
+   walks the whole thing regardless of which mode is on. A row shows
+   the title, where it happened and when; the numbers live in the
+   hover readout so the list stays scannable.
    ============================================================ */
 
 (function (ASM) {
@@ -40,6 +42,7 @@
     if (State.sessionSort === "context") sorted.sort((a, b) => (b.context_pct || 0) - (a.context_pct || 0));
     else if (State.sessionSort === "turns") sorted.sort((a, b) => (b.assistant_messages || 0) - (a.assistant_messages || 0));
     else if (State.sessionSort === "cost") sorted.sort((a, b) => (b.cost || 0) - (a.cost || 0));
+    else if (State.sessionSort === "time") sorted.sort((a, b) => (b.active_ms || 0) - (a.active_ms || 0));
     else sorted.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
     return sorted;
   }
@@ -47,42 +50,52 @@
   /* ---------- rows ---------- */
 
   function sessionRow(session, options = {}) {
-    const active = session.session_id === State.sessionId;
+    const active = session.session_id === State.sessionId && State.view === "session";
     const title = session.title || session.first_prompt || "Untitled session";
-    const tags = [];
-    if (session.active) tags.push(`<span class="dot-active" title="written to in the last two minutes"></span>`);
-    if (session.has_subagents) tags.push(`<span class="c-web" title="spawned subagents">◈</span>`);
-    const cost = session.provider === "codex" ? "" : fmt.cost(session.cost);
+    const priced = session.provider !== "codex";
     const context = Number(session.context_pct || 0);
-    return `<div class="sb-row ${options.nested ? "nested" : ""} ${active ? "active" : ""}"
+    const tokens = session.tokens != null ? session.tokens : (session.usage || {}).total;
+    const tip = [
+      title,
+      `${fmt.plural(session.assistant_messages || 0, "turn")} · ${fmt.plural(session.tool_calls || 0, "tool call")}${session.tool_errors ? ` · ${session.tool_errors} failed` : ""}`,
+      `${fmt.hours(session.active_ms)} active · ${fmt.tokens(tokens)} tokens${priced ? ` · ${fmt.cost(session.cost)}` : ""}`,
+      context ? `context ${context.toFixed(0)}%` : "",
+    ].filter(Boolean).join("\n");
+    const meta = [];
+    if (options.showProject && session.project_name) meta.push(`<span class="nowrap">${esc(session.project_name)}</span>`);
+    if (priced && session.cost >= 0.005) meta.push(`<span class="p-cost">${fmt.cost(session.cost)}</span>`);
+    else if (!priced && tokens) meta.push(`<span>${fmt.tokens(tokens)}</span>`);
+    if (session.active_ms >= 60000) meta.push(`<span>${fmt.hours(session.active_ms)}</span>`);
+    const marks = [];
+    if (session.active) marks.push(`<span class="dot-active" title="written to in the last two minutes"></span>`);
+    if (session.tool_errors >= 5) marks.push(`<span class="mark-err" title="${session.tool_errors} failed tool calls"></span>`);
+    if (session.has_subagents) marks.push(`<span class="mark-agent" title="spawned subagents"></span>`);
+    return `<div class="sb-row ${options.nested ? "nested" : ""} ${active ? "active" : ""} ${esc(session.provider || "")}"
         data-action="open-session" data-pid="${esc(session.project_id || State.projectId || "")}"
-        data-sid="${esc(session.session_id)}" data-row="${options.rowIndex}">
+        data-sid="${esc(session.session_id)}" data-row="${options.rowIndex}" data-tip="${esc(tip)}">
       <span class="sb-main">
         <span class="sb-title">${esc(title)}</span>
-        <span class="sb-sub">
-          ${options.showProject && session.project_name ? `<span class="nowrap">${esc(session.project_name)}</span>` : ""}
-          <span><b>${session.assistant_messages || 0}</b> turns</span>
-          <span><b>${session.tool_calls || 0}</b> tools</span>
-          ${cost ? `<span class="p-cost">${cost}</span>` : ""}
-        </span>
+        <span class="sb-sub">${meta.join("")}</span>
       </span>
       <span class="sb-right">
-        <span class="sb-when">${esc(fmt.rel(session.mtime))} ${tags.join("")}</span>
-        ${context ? ui.meter(context) : ""}
+        <span class="sb-when">${esc(fmt.rel(session.mtime))}</span>
+        <span class="sb-marks">${marks.join("")}${context >= 50 ? ui.meter(context) : ""}</span>
       </span></div>`;
   }
 
   function projectRow(project, expanded, rowIndex) {
     const active = project.id === State.projectId;
-    return `<div class="sb-row ${active ? "active" : ""} ${expanded ? "open" : ""}"
-        data-action="toggle-project" data-id="${esc(project.id)}" data-row="${rowIndex}">
+    const priced = project.provider !== "codex";
+    return `<div class="sb-row project ${active ? "active" : ""} ${expanded ? "open" : ""}"
+        data-action="toggle-project" data-id="${esc(project.id)}" data-row="${rowIndex}"
+        data-tip="${esc(project.name)}\n${fmt.plural(project.session_count || 0, "session")} · ${fmt.hours(project.active_ms)} active${priced ? ` · ${fmt.cost(project.total_cost)}` : ""}">
       <span class="sb-caret">▶</span>
       <span class="sb-main">
         <span class="sb-title">${esc(project.name)}</span>
         <span class="sb-sub">
-          <span><b>${project.session_count || 0}</b> sessions</span>
+          <span>${fmt.plural(project.session_count || 0, "session")}</span>
           ${project.provider && State.agent === "all" ? `<span>${esc(ASM.agentInfo(project.provider).short)}</span>` : ""}
-          ${project.provider === "codex" ? "" : `<span class="p-cost">${fmt.cost(project.total_cost)}</span>`}
+          ${priced && project.total_cost >= 0.005 ? `<span class="p-cost">${fmt.cost(project.total_cost)}</span>` : ""}
         </span>
       </span>
       <span class="sb-right">
@@ -94,7 +107,7 @@
   /* ---------- modes ---------- */
 
   function recentBody() {
-    if (!State.recent) return `<div class="skeleton">Indexing every session…</div>`;
+    if (!State.recent) return ui.skeletonRows(9);
     const list = sortSessions(State.recent.filter((session) => matches(session) && passesFilter(session)));
     if (!list.length) {
       return `<div class="sb-empty">${State.search ? "No session matches that." : "No sessions indexed yet."}</div>`;
@@ -123,6 +136,7 @@
   }
 
   function projectsBody() {
+    if (!State.projects.length && State.loading.overview) return ui.skeletonRows(8);
     const query = State.search.trim().toLowerCase();
     const projects = State.projects.filter((project) =>
       !query || project.name.toLowerCase().includes(query) || String(project.path || "").toLowerCase().includes(query));
@@ -137,7 +151,7 @@
       rows.push({ type: "project", id: project.id });
       if (!expanded) return;
       if (project.id !== State.projectId || !State.sessions.length) {
-        html += `<div class="sb-empty" style="padding:8px 26px">Loading sessions…</div>`;
+        html += ui.skeletonRows(3);
         return;
       }
       const sessions = sortSessions(State.sessions.filter((session) => matches(session) && passesFilter(session)));
@@ -180,14 +194,15 @@
         <div class="sb-filters">
           <select class="picker" data-role="session-filter" aria-label="Filter sessions by status">
             <option value="all" ${State.sessionFilter === "all" ? "selected" : ""}>All</option>
-            <option value="active" ${State.sessionFilter === "active" ? "selected" : ""}>Active</option>
-            <option value="idle" ${State.sessionFilter === "idle" ? "selected" : ""}>History</option>
+            <option value="active" ${State.sessionFilter === "active" ? "selected" : ""}>Live now</option>
+            <option value="idle" ${State.sessionFilter === "idle" ? "selected" : ""}>Not live</option>
           </select>
           <select class="picker" data-role="session-sort" aria-label="Sort sessions">
-            <option value="recent" ${State.sessionSort === "recent" ? "selected" : ""}>Recent</option>
-            <option value="context" ${State.sessionSort === "context" ? "selected" : ""}>Context</option>
-            <option value="turns" ${State.sessionSort === "turns" ? "selected" : ""}>Turns</option>
-            <option value="cost" ${State.sessionSort === "cost" ? "selected" : ""}>Cost</option>
+            <option value="recent" ${State.sessionSort === "recent" ? "selected" : ""}>Newest</option>
+            <option value="time" ${State.sessionSort === "time" ? "selected" : ""}>Longest</option>
+            <option value="cost" ${State.sessionSort === "cost" ? "selected" : ""}>Most spent</option>
+            <option value="turns" ${State.sessionSort === "turns" ? "selected" : ""}>Most turns</option>
+            <option value="context" ${State.sessionSort === "context" ? "selected" : ""}>Fullest context</option>
           </select>
         </div>
       </div>

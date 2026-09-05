@@ -3,6 +3,11 @@
    return HTML strings — the app renders by replacing innerHTML on a
    pane, which is fast enough for these payloads and keeps each view
    a plain function of state.
+
+   Anything that shows a value on hover uses a `data-tip` attribute;
+   one delegated handler in app.js turns those into the floating
+   readout, so a chart, a bar list and a calendar cell all get the
+   same tooltip without carrying their own.
    ============================================================ */
 
 (function (ASM) {
@@ -18,10 +23,17 @@
     agent: "subagent", plan: "plan", ask: "question", mcp: "mcp", other: "other",
   };
 
+  /** What each traced moment is called in the interface. */
+  const TRACE_LABELS = {
+    skill: "skill", agent: "agent", kill: "kill", interrupt: "interrupted",
+    command: "command", compaction: "compaction",
+  };
+
   function section(title, body, options = {}) {
     const actions = options.actions ? `<div class="st-actions">${options.actions}</div>` : "";
     const desc = options.desc ? `<div class="section-desc">${esc(options.desc)}</div>` : "";
-    return `<section class="section">
+    const id = options.id ? ` id="${esc(options.id)}"` : "";
+    return `<section class="section ${esc(options.cls || "")}"${id}>
       <div class="section-title"><span>${esc(title)}</span>${actions}</div>
       ${desc}${body}</section>`;
   }
@@ -30,13 +42,24 @@
     return `<div class="card ${extraClass}">${body}</div>`;
   }
 
+  /**
+   * A stat tile: label, value, an optional line under it, and either a
+   * delta against a named period or a sparkline. The value is the loud
+   * part; everything else is quiet.
+   */
   function tile(label, value, sub, options = {}) {
-    const cls = options.accent ? "tile accent" : "tile";
-    const tip = options.tip ? ` title="${esc(options.tip)}"` : "";
+    const cls = ["tile", options.accent ? "accent" : "", options.cls || ""].join(" ").trim();
+    const tip = options.tip ? ` data-tip="${esc(options.tip)}"` : "";
     const spark = options.spark ? `<div class="t-spark">${options.spark}</div>` : "";
+    let delta = "";
+    if (options.delta) {
+      const tone = options.delta === "new" || options.delta === "±0%" ? ""
+        : ((options.delta.startsWith("+") === !!options.upIsGood) ? "good" : "bad");
+      delta = `<span class="t-delta ${tone}" title="${esc(options.deltaLabel || "vs the previous period")}">${esc(options.delta)}</span>`;
+    }
     return `<div class="${cls}"${tip}>
       <div class="t-label">${esc(label)}</div>
-      <div class="t-value">${value}</div>
+      <div class="t-row"><div class="t-value">${value}</div>${delta}</div>
       ${sub ? `<div class="t-sub">${esc(sub)}</div>` : ""}${spark}</div>`;
   }
 
@@ -63,7 +86,7 @@
     const cls = value > 80 ? "meter crit" : value > 50 ? "meter warn" : "meter";
     let slots = "";
     for (let i = 0; i < 10; i += 1) slots += `<span class="slot ${i < filled ? "on" : ""}"></span>`;
-    return `<span class="${cls}" title="${value.toFixed(0)}% of the context window">${slots}</span>`;
+    return `<span class="${cls}" data-tip="${value.toFixed(0)}% of the context window">${slots}</span>`;
   }
 
   function meterRow(label, percent, text) {
@@ -72,13 +95,29 @@
       <span class="m-val">${esc(text != null ? text : value.toFixed(0) + "%")}</span></div>`;
   }
 
-  function emptyState(glyph, title, sub) {
+  function emptyState(glyph, title, sub, actions = "") {
     return `<div class="empty"><div class="empty-ic">${esc(glyph)}</div>
-      <h3>${esc(title)}</h3>${sub ? `<p>${esc(sub)}</p>` : ""}</div>`;
+      <h3>${esc(title)}</h3>${sub ? `<p>${esc(sub)}</p>` : ""}${actions ? `<div class="row">${actions}</div>` : ""}</div>`;
   }
+
+  /* ---------- skeletons: the shape of what is coming ---------- */
 
   function skeleton(text) {
     return `<div class="skeleton">${esc(text)}</div>`;
+  }
+
+  function skeletonTiles(count = 4) {
+    return `<div class="tiles">${Array.from({ length: count }, () =>
+      `<div class="tile sk"><span class="sk-line w40"></span><span class="sk-line w60 tall"></span><span class="sk-line w70"></span></div>`).join("")}</div>`;
+  }
+
+  function skeletonRows(count = 6) {
+    return `<div class="sk-rows">${Array.from({ length: count }, (_, index) =>
+      `<div class="sk-row"><span class="sk-line" style="width:${58 + ((index * 17) % 30)}%"></span><span class="sk-line w20"></span></div>`).join("")}</div>`;
+  }
+
+  function skeletonChart(height = 160) {
+    return `<div class="sk-chart" style="height:${height}px"></div>`;
   }
 
   function notice(html, cls = "") {
@@ -103,7 +142,7 @@
     if (!total) return `<div class="stack ${options.tall ? "tall" : ""}"></div>`;
     const segments = entries.map(([category, count]) =>
       `<span class="seg bg-${category}" style="width:${(100 * count / total).toFixed(2)}%"
-        title="${count} ${esc(CATEGORY_LABELS[category] || category)}"></span>`).join("");
+        data-tip="${esc(CATEGORY_LABELS[category] || category)}\n${count} ${count === 1 ? "call" : "calls"} · ${(100 * count / total).toFixed(0)}%"></span>`).join("");
     return `<div class="stack ${options.tall ? "tall" : ""}">${segments}</div>`;
   }
 
@@ -124,26 +163,27 @@
       const off = options.filter && options.filter.has(category);
       const spent = Number(times[category]) || 0;
       const label = CATEGORY_LABELS[category] || category;
-      const tip = `${label} — ${count} call${count === 1 ? "" : "s"}` +
-        (spent ? `, ${fmt.duration(spent)} of wall clock` : "") +
-        (options.action ? ` · click to ${off ? "show" : "hide"}` : "");
+      const tip = `${label}\n${count} call${count === 1 ? "" : "s"}` +
+        (spent ? `\n${fmt.duration(spent)} of wall clock` : "") +
+        (options.action ? `\nclick to ${off ? "show" : "hide"}` : "");
       return `<button class="jn-cat ${off ? "off" : ""}" data-action="${esc(options.action || "")}"
-        data-cat="${category}" title="${esc(tip)}">
+        data-cat="${category}" data-tip="${esc(tip)}">
         ${categoryDot(category)}<span>${esc(label)}</span><b>${count}</b>
         ${spent ? `<i class="jc-ms">${esc(fmt.duration(spent))}</i>` : ""}</button>`;
     }).join("")}</div>`;
   }
 
-  /** Horizontal bars for a ranked list. */
+  /** Horizontal bars for a ranked list. One series, so one colour. */
   function barList(items, options = {}) {
     if (!items.length) return `<div class="chart-empty">No data yet.</div>`;
     const max = Math.max(1, ...items.map((item) => item.value));
-    return `<div class="chart-bars">${items.map((item, index) => {
-      const colour = item.color || `var(--series-${(index % 8) + 1})`;
+    return `<div class="chart-bars">${items.map((item) => {
+      const colour = item.color || options.color || "var(--series-1)";
       const width = (100 * item.value / max).toFixed(1);
-      const label = options.rtl === false ? esc(item.label) : esc(item.label);
-      return `<div class="bar-row"${item.action ? ` data-action="${esc(item.action)}" data-id="${esc(item.id || "")}" style="cursor:pointer"` : ""}>
-        <span class="bar-label" title="${esc(item.label)}">${label}</span>
+      const tip = item.tip || `${item.label}\n${item.valueText != null ? item.valueText : item.value}`;
+      return `<div class="bar-row"${item.action ? ` data-action="${esc(item.action)}" data-id="${esc(item.id || "")}"` : ""}
+          data-tip="${esc(tip)}">
+        <span class="bar-label">${esc(item.label)}</span>
         <span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${colour}"></span></span>
         <span class="bar-val">${esc(item.valueText != null ? item.valueText : item.value)}</span>
       </div>`;
@@ -160,6 +200,60 @@
       `<button class="tab ${key === current ? "active" : ""}" data-action="${esc(action)}" data-tab="${esc(key)}">
         ${esc(label)}${count != null ? `<span class="tab-count">${count}</span>` : ""}
       </button>`).join("")}</div>`;
+  }
+
+  /** A row of exclusive choices: a period, a sort, a grouping. */
+  function segmented(options, current, action, options2 = {}) {
+    return `<div class="seg" role="group" aria-label="${esc(options2.label || "")}">${options.map(([key, label]) =>
+      `<button class="chip ${String(key) === String(current) ? "on" : ""}" data-action="${esc(action)}"
+        data-value="${esc(key)}" ${options2.dataKey ? `data-key="${esc(options2.dataKey)}"` : ""}>${esc(label)}</button>`).join("")}</div>`;
+  }
+
+  /**
+   * A table with sortable headers.
+   *
+   * columns: [{ key, label, align?, format?(row), sortable?, tip?, width? }]
+   * rows:    objects; `options.rowAttrs(row)` may return extra attributes such
+   *          as a data-action so a row opens what it names.
+   */
+  function table(columns, rows, options = {}) {
+    const sortKey = options.sortKey || "";
+    const sortDir = options.sortDir || "desc";
+    const head = columns.map((column) => {
+      const active = column.key === sortKey;
+      const arrow = active ? (sortDir === "asc" ? "▲" : "▼") : "";
+      const attrs = column.sortable === false ? "" :
+        ` data-action="${esc(options.sortAction || "sort")}" data-key="${esc(column.key)}" ${options.sortScope ? `data-scope="${esc(options.sortScope)}"` : ""}`;
+      return `<th class="${column.align === "right" ? "num" : ""} ${active ? "sorted" : ""}"${column.tip ? ` data-tip="${esc(column.tip)}"` : ""}>
+        <button class="th-btn"${attrs}>${esc(column.label)}${arrow ? `<span class="th-arrow">${arrow}</span>` : ""}</button></th>`;
+    }).join("");
+    const body = rows.length ? rows.map((row) => {
+      const attrs = options.rowAttrs ? options.rowAttrs(row) : "";
+      return `<tr${attrs ? " " + attrs : ""}>${columns.map((column) => {
+        const value = column.format ? column.format(row) : esc(row[column.key]);
+        return `<td class="${column.align === "right" ? "num" : ""}">${value}</td>`;
+      }).join("")}</tr>`;
+    }).join("") : `<tr><td colspan="${columns.length}" class="table-empty">${esc(options.empty || "Nothing to show.")}</td></tr>`;
+    return `<div class="table-wrap"><table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  /**
+   * Findings in plain language, each with a tone (good, note, warn, bad).
+   * `items` is [{ tone, text, detail?, action?, id? }]; `text` is a ready
+   * HTML string so a caller can bold the number that matters.
+   */
+  function insights(items, options = {}) {
+    if (!items.length) return "";
+    return `<ul class="insights">${items.map((item) =>
+      `<li class="insight ${esc(item.tone || "note")}"${item.action ? ` data-action="${esc(item.action)}" data-id="${esc(item.id || "")}"` : ""}>
+        <span class="in-dot" aria-hidden="true"></span>
+        <span class="in-body"><span class="in-text">${item.text}</span>${item.detail ? `<span class="in-detail">${esc(item.detail)}</span>` : ""}</span>
+      </li>`).join("")}</ul>`;
+  }
+
+  /** A small coloured mark for a trace kind, with its label. */
+  function traceChip(kind, label) {
+    return `<span class="trace-chip k-${esc(kind)}"><span class="tc-dot"></span>${esc(label || TRACE_LABELS[kind] || kind)}</span>`;
   }
 
   /**
@@ -200,11 +294,22 @@
     return "other";
   }
 
+  /** Fold raw tool counts into the ten categories. */
+  function categoryTotals(toolCounts) {
+    const totals = {};
+    Object.entries(toolCounts || {}).forEach(([name, count]) => {
+      const category = categorize(name);
+      totals[category] = (totals[category] || 0) + (Number(count) || 0);
+    });
+    return totals;
+  }
+
   ASM.categorize = categorize;
   ASM.ui = {
-    CATEGORIES, CATEGORY_LABELS, categorize,
+    CATEGORIES, CATEGORY_LABELS, TRACE_LABELS, categorize, categoryTotals,
     section, card, tile, badge, providerBadge, sourceBadge, meter, meterRow,
-    emptyState, skeleton, notice, categoryDot, stackBar, categoryLegend,
-    barList, kv, tabs,
+    emptyState, skeleton, skeletonTiles, skeletonRows, skeletonChart, notice,
+    categoryDot, stackBar, categoryLegend, barList, kv, tabs, segmented, table,
+    insights, traceChip,
   };
 })(window.ASM = window.ASM || {});

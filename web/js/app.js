@@ -1,12 +1,17 @@
 /* ============================================================
    The router: chrome, navigation, data loading, event delegation,
-   keyboard, and boot.
+   keyboard, live refresh and boot.
 
-   Rendering is deliberately coarse — a view is a pure function of
-   state and the router replaces one pane's innerHTML. The payloads
-   are small (the backend pre-aggregates everything chart-shaped and
-   pages the transcript), so this is fast and leaves no room for a
-   half-updated screen.
+   Loading is progressive. Boot fires every independent request at
+   once and each paints its own region when it lands: the project
+   list, the recent sessions, the dashboard figures. Nothing waits
+   for the slowest scan, and while a cold index runs the status bar
+   shows how far it is.
+
+   Rendering is coarse on purpose — a view is a pure function of
+   state and the router replaces one pane's innerHTML — but the
+   session inspector re-renders only its tab body on a live tick, so
+   a running session never resets the reader's scroll or selection.
 
    Every async load takes a ticket from State.requestSeq before it
    starts and discards its result if a newer ticket was issued while
@@ -17,7 +22,7 @@
 (function (ASM) {
   "use strict";
 
-  const { esc, fmt, dom, clamp, debounce, raf } = ASM.util;
+  const { esc, fmt, dom, clamp, debounce, throttle, raf } = ASM.util;
   const ui = ASM.ui;
   const scope = ASM.scope;
   const State = ASM.state;
@@ -26,10 +31,12 @@
   const MAX_BROWSER_TRANSCRIPT_EVENTS = 1200;
   const MIN_MAIN_WIDTH = 420;
   const SIDEBAR = { css: "--sidebar-width", storage: "asm.sidebarWidth", default: 300, min: 220, max: 520 };
+  const SESSION_TABS = ["summary", "timeline", "transcript", "trace", "subagents", "tasks", "workspace", "images", "details"];
 
   const VIEWS = [
     ["overview", "Overview", "◱"],
     ["sessions", "Sessions", "◈"],
+    ["activity", "Activity", "◎"],
     ["monitor", "Monitor", "◉"],
     ["cleanup", "Cleanup", "⌫"],
     ["tune", "Instructions", "✎"],
@@ -47,7 +54,7 @@
     ["Refresh data", "F5"],
     ["New agent session", "Ctrl N"],
     ["Resume this session", "Ctrl Enter"],
-    ["Overview · Monitor · Cleanup · Instructions", "Ctrl 1…4"],
+    ["Overview · Activity · Monitor · Cleanup · Instructions", "Ctrl 1…5"],
     ["Settings", "Ctrl ,"],
     ["Toggle the sidebar", "Ctrl B"],
     ["Toggle light / dark", "Ctrl Shift L"],
@@ -56,6 +63,13 @@
     ["Close or clear", "Esc"],
     ["This reference", "?"],
   ];
+
+  State.sorts = State.sorts || {};
+  State.timing = { boot: Math.round(performance.now()) };
+
+  function markTiming(key) {
+    if (State.timing[key] == null) State.timing[key] = Math.round(performance.now());
+  }
 
   /* ================================================================ */
   /* chrome                                                            */
@@ -94,6 +108,7 @@
         State.sources.map((item) => `<option value="${esc(item.id)}" ${State.enabledSources.has(item.id) ? "" : "disabled"}>
           ${esc(item.label)}${State.enabledSources.has(item.id) ? "" : " (off)"}</option>`).join("")}`;
       source.value = State.source;
+      source.hidden = State.sources.length <= 1;
     }
   }
 
@@ -103,7 +118,7 @@
     if (!State.openTabs.length) { strip.classList.add("hidden"); strip.innerHTML = ""; return; }
     strip.classList.remove("hidden");
     strip.innerHTML = State.openTabs.map((tab) =>
-      `<button class="session-tab ${tab.sid === State.sessionId ? "active" : ""} ${esc(tab.provider || "")}"
+      `<button class="session-tab ${tab.sid === State.sessionId && State.view === "session" ? "active" : ""} ${esc(tab.provider || "")}"
         data-action="open-session" data-pid="${esc(tab.pid)}" data-sid="${esc(tab.sid)}" title="${esc(tab.title)}">
         <span class="st-dot"></span><span class="st-label">${esc(tab.title)}</span>
         <span class="st-close" data-action="close-tab" data-sid="${esc(tab.sid)}" title="Close">×</span></button>`).join("");
@@ -122,14 +137,24 @@
       scopeText.textContent = `${environment} · ${ASM.agentInfo(State.agent).short} · ${project ? project.name : "All projects"}`;
     }
     if (!summary) return;
+    if (State.indexing && State.indexing.total > State.indexing.done) {
+      const which = State.indexing.provider === "codex" ? "Codex" : "Claude";
+      summary.innerHTML = `<span class="spinner"></span> Indexing ${esc(which)} sessions · ${State.indexing.done} of ${State.indexing.total}`;
+      return;
+    }
     if (State.view === "session" && State.sessionId) {
       const session = scope.currentSession() || {};
-      summary.textContent = `${session.active ? "recent activity · " : ""}${session.assistant_messages || 0} turns · ` +
-        `${fmt.tokens((session.usage || {}).total)} tokens${session.provider === "codex" ? "" : ` · ${fmt.cost(session.cost)} estimate`}`;
+      const detail = State.detail || {};
+      const analytics = detail.analytics || {};
+      summary.textContent = `${session.active ? "live · " : ""}${fmt.hours(analytics.active_ms || session.active_ms)} active · ` +
+        `${fmt.tokens((detail.usage || session.usage || {}).total)} tokens${session.provider === "codex" ? "" : ` · ${fmt.cost(detail.cost != null ? detail.cost : session.cost)}`}`;
     } else if (project) {
-      summary.textContent = `${State.sessions.length} sessions${project.provider === "codex" ? "" : ` · ${fmt.cost(project.total_cost)} estimate`}`;
+      summary.textContent = `${fmt.plural(State.sessions.length, "session")}${project.provider === "codex" ? "" : ` · ${fmt.cost(project.total_cost)}`}`;
     } else {
-      summary.textContent = `${State.projects.length} projects · ${(State.globalStats && State.globalStats.sessions) || 0} sessions indexed`;
+      const stats = State.globalStats;
+      summary.textContent = stats
+        ? `${fmt.plural(State.projects.length, "project")} · ${fmt.plural(stats.sessions, "session")} · ${fmt.hours(stats.active_ms)} with agents`
+        : `${fmt.plural(State.projects.length, "project")} · indexing…`;
     }
   }
 
@@ -151,6 +176,7 @@
       case "monitor": return ASM.views.monitor.render();
       case "cleanup": return ASM.views.cleanup.render();
       case "tune": return ASM.views.tune.render();
+      case "activity": return ASM.views.activity.render();
       case "search": return ASM.views.misc.searchView();
       case "memory": return ASM.views.misc.memoryView();
       case "session": return ASM.views.session.render();
@@ -159,11 +185,18 @@
     }
   }
 
+  let renderedAt = "";
+
   function renderMain() {
     const pane = dom.id("main-pane");
     if (!pane) return;
-    const flush = State.view === "session";
-    pane.innerHTML = `<div class="view${flush ? "" : ""}">${mainView()}</div>`;
+    hideTip();
+    pane.innerHTML = `<div class="view">${mainView()}</div>`;
+    // A new place starts at the top; a re-render of the same place keeps the
+    // reader where they were.
+    const key = `${State.view}:${State.projectId || ""}:${State.sessionId || ""}`;
+    if (key !== renderedAt) pane.scrollTop = 0;
+    renderedAt = key;
     dom.enhance(pane);
     if (State.view === "session") ASM.views.session.mountTab();
     renderChrome();
@@ -173,6 +206,7 @@
   function renderTab() {
     const body = dom.id("tab-body");
     if (!body || State.view !== "session") { renderMain(); return; }
+    hideTip();
     body.innerHTML = ASM.views.session.tabBody();
     dom.enhance(body);
     ASM.views.session.mountTab();
@@ -183,10 +217,87 @@
     });
   }
 
+  /** Redraw the session header facts without touching the tab body. */
+  function renderSessionHead() {
+    const head = dom.q(".session-head");
+    if (!head || State.view !== "session") return;
+    head.outerHTML = ASM.views.session.header();
+    dom.enhance(dom.q(".session-head"));
+  }
+
+  function renderSidebar() { ASM.views.sidebar.render(); }
+
   function renderAll() {
-    ASM.views.sidebar.render();
+    renderSidebar();
     renderMain();
   }
+
+  /* ================================================================ */
+  /* the shared hover readout                                          */
+  /* ================================================================ */
+
+  let tipElement = null;
+  let tipTarget = null;
+
+  function tipNode() {
+    if (!tipElement) {
+      tipElement = document.createElement("div");
+      tipElement.className = "tip";
+      tipElement.hidden = true;
+      document.body.appendChild(tipElement);
+    }
+    return tipElement;
+  }
+
+  function showTip(target, x, y) {
+    const text = target.getAttribute("data-tip");
+    if (!text) return;
+    const node = tipNode();
+    node.replaceChildren();
+    const lines = text.split("\n").filter((line) => line.length);
+    lines.forEach((line, index) => {
+      const row = document.createElement(index === 0 ? "strong" : "span");
+      row.textContent = line;
+      node.appendChild(row);
+    });
+    node.hidden = false;
+    placeTip(x, y);
+  }
+
+  function placeTip(x, y) {
+    const node = tipNode();
+    if (node.hidden) return;
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
+    let left = x + 12;
+    let top = y - height - 12;
+    if (left + width > window.innerWidth - 8) left = x - width - 12;
+    if (top < 8) top = y + 16;
+    node.style.left = `${Math.max(6, left)}px`;
+    node.style.top = `${Math.max(6, top)}px`;
+  }
+
+  function hideTip() {
+    if (tipElement) tipElement.hidden = true;
+    tipTarget = null;
+  }
+
+  document.addEventListener("mousemove", (event) => {
+    const target = event.target.closest && event.target.closest("[data-tip]");
+    if (!target) { if (tipTarget) hideTip(); return; }
+    if (target !== tipTarget) { tipTarget = target; showTip(target, event.clientX, event.clientY); }
+    else placeTip(event.clientX, event.clientY);
+  });
+  document.addEventListener("mouseleave", hideTip);
+  document.addEventListener("scroll", hideTip, true);
+  document.addEventListener("focusin", (event) => {
+    const target = event.target.closest && event.target.closest("[data-tip]");
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    tipTarget = target;
+    showTip(target, rect.left + rect.width / 2, rect.top);
+  });
+  document.addEventListener("focusout", hideTip);
 
   /* ================================================================ */
   /* sidebar sizing                                                    */
@@ -277,7 +388,13 @@
   /* loaders                                                           */
   /* ================================================================ */
 
+  /** Call once per enabled source, so a slow WSL walk never delays Windows. */
+  function perSource(method, ...args) {
+    return Promise.all(scope.sourceIds().map((id) => call(method, ...args, JSON.stringify([id]))));
+  }
+
   async function loadSources(refresh = false) {
+    if (!ASM.api.isLive()) return;
     const data = await call(refresh ? "refreshSources" : "getSources");
     State.sources = (data && data.sources) || [{ id: "windows", label: "Windows", kind: "local", available: true }];
     const known = new Set(State.sources.map((source) => source.id));
@@ -291,35 +408,99 @@
     renderPickers();
   }
 
+  /** The project list — the Projects browser and the dashboard's roll-ups. */
   async function loadOverview() {
+    if (!ASM.api.isLive()) return;
     const ticket = ++State.requestSeq.overview;
-    const sourceScope = scope.sourceScope();
-    const [overview, stats] = await Promise.all([
-      call("getProviderOverview", State.agent, sourceScope),
-      call("getProviderGlobalStats", State.agent, sourceScope),
-    ]);
+    State.loading.overview = true;
+    const results = await perSource("getProviderOverview", State.agent);
     if (ticket !== State.requestSeq.overview) return;
-    if (overview) {
-      State.projects = overview.projects || [];
-      State.agentHome = overview.home;
-      State.claudeHome = overview.claude_home || State.claudeHome;
-      State.codexHome = overview.codex_home || State.codexHome;
+    State.loading.overview = false;
+    const found = results.filter(Boolean);
+    markTiming("projects");
+    if (found.length) {
+      State.projects = found.flatMap((item) => item.projects || [])
+        .sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
+      const first = found[0];
+      State.agentHome = first.home;
+      State.claudeHome = first.claude_home || State.claudeHome;
+      State.codexHome = first.codex_home || State.codexHome;
     }
-    if (stats) State.globalStats = stats;
     State.overviewDirty = false;
-    ASM.views.sidebar.render();
-    if (State.view === "overview") renderMain();
+    if (State.browseMode === "projects") renderSidebar();
+    if (State.view === "overview" || State.view === "activity") renderMain();
     else renderChrome();
   }
 
-  /** Every session on the machine — the Recent sidebar and Monitor need it. */
+  /** The dashboard figures: spend, time, reliability, skills and agents. */
+  async function loadStats() {
+    if (!ASM.api.isLive()) return;
+    const ticket = ++State.requestSeq.stats;
+    State.loading.stats = true;
+    const results = await perSource("getProviderGlobalStats", State.agent);
+    if (ticket !== State.requestSeq.stats) return;
+    State.loading.stats = false;
+    markTiming("stats");
+    const found = results.filter(Boolean);
+    if (found.length) State.globalStats = found.length === 1 ? found[0] : mergeStats(found);
+    if (State.view === "overview" || State.view === "activity") renderMain();
+    else renderChrome();
+  }
+
+  /** Fold per-source stats payloads into one, the way the bridge does. */
+  function mergeStats(parts) {
+    const out = JSON.parse(JSON.stringify(parts[0]));
+    const days = new Map((out.daily || []).map((day) => [day.d, day]));
+    const tables = { skills: {}, agents: {}, commands: {} };
+    for (const table of Object.keys(tables)) Object.assign(tables[table], out[table] || {});
+    for (const part of parts.slice(1)) {
+      for (const key of ["cost", "sessions", "active", "prompts", "turns", "tool_calls", "subagent_sessions",
+        "tool_errors", "compactions", "active_ms", "kills", "interrupts", "cache_savings"]) {
+        out[key] = (Number(out[key]) || 0) + (Number(part[key]) || 0);
+      }
+      for (const [key, value] of Object.entries(part.usage || {})) out.usage[key] = (out.usage[key] || 0) + value;
+      for (const [model, values] of Object.entries(part.by_model || {})) {
+        const bucket = out.by_model[model] || (out.by_model[model] = { input: 0, output: 0, cache_read: 0, cache_write: 0, total: 0, cost: 0 });
+        for (const key of ["input", "output", "cache_read", "cache_write", "total", "cost"]) bucket[key] = (bucket[key] || 0) + (values[key] || 0);
+      }
+      for (const [name, count] of Object.entries(part.tool_counts || {})) out.tool_counts[name] = (out.tool_counts[name] || 0) + count;
+      (part.activity || []).forEach((row, day) => row.forEach((count, hour) => { out.activity[day][hour] += count; }));
+      for (const day of part.daily || []) {
+        const bucket = days.get(day.d);
+        if (!bucket) { days.set(day.d, JSON.parse(JSON.stringify(day))); continue; }
+        for (const key of ["cost", "tokens", "turns", "prompts", "errors", "active_ms", "sessions"]) bucket[key] += day[key] || 0;
+        for (const [model, cost] of Object.entries(day.models || {})) bucket.models[model] = (bucket.models[model] || 0) + cost;
+      }
+      out.by_project = (out.by_project || []).concat(part.by_project || []);
+      for (const table of Object.keys(tables)) {
+        for (const [name, row] of Object.entries(part[table] || {})) {
+          const bucket = tables[table][name] || (tables[table][name] = { count: 0, sessions: 0, projects: 0, last: 0 });
+          bucket.count += row.count; bucket.sessions += row.sessions; bucket.projects += row.projects;
+          bucket.last = Math.max(bucket.last, row.last);
+        }
+      }
+      if (part.first_activity && (!out.first_activity || part.first_activity < out.first_activity)) out.first_activity = part.first_activity;
+    }
+    out.daily = [...days.values()].sort((a, b) => a.d.localeCompare(b.d));
+    out.by_project.sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
+    Object.assign(out, tables);
+    return out;
+  }
+
+  /** Every session on the machine — the Recent sidebar, Monitor and Cleanup need it. */
   async function loadRecent(force = false) {
+    if (!ASM.api.isLive()) return;
     if (State.recent && !force) return;
     const ticket = ++State.requestSeq.recent;
-    const data = await call("getProviderAllSessions", State.agent, scope.sourceScope());
+    State.loading.recent = true;
+    const results = await perSource("getProviderAllSessions", State.agent);
     if (ticket !== State.requestSeq.recent) return;
-    State.recent = (data && data.sessions) || [];
-    if (State.browseMode === "recent") ASM.views.sidebar.render();
+    State.loading.recent = false;
+    markTiming("recent");
+    const found = results.filter(Boolean);
+    State.recent = found.flatMap((item) => item.sessions || []);
+    if (State.browseMode === "recent") renderSidebar();
+    if (State.view === "monitor") renderMain();
   }
 
   async function loadProjectSessions(projectId) {
@@ -352,12 +533,16 @@
       renderMain();
       return;
     }
-    State.settings = State.agent === "codex" ? await call("getCodexSettings") : await call("getSettings");
-    State.statuslineStatus = State.agent === "claude" ? await call("statuslineStatus") : null;
-    const project = scope.currentProject();
-    const files = State.agent === "codex"
-      ? await call("listCodexConfigFiles", (project && project.path) || "")
-      : await call("listConfigFiles");
+    renderMain();
+    const [settings, statusline, files] = await Promise.all([
+      State.agent === "codex" ? call("getCodexSettings") : call("getSettings"),
+      State.agent === "claude" ? call("statuslineStatus") : Promise.resolve(null),
+      State.agent === "codex"
+        ? call("listCodexConfigFiles", ((scope.currentProject() || {}).path) || "")
+        : call("listConfigFiles"),
+    ]);
+    State.settings = settings;
+    State.statuslineStatus = statusline;
     State.configFiles = (files && files.files) || [];
     renderMain();
   }
@@ -385,9 +570,20 @@
     State.cleanupLimit = 300;
     scope.clearSelection();
     renderMain();
-    const data = await call("getProviderAllSessions", State.agent, scope.sourceScope());
+    if (!ASM.api.isLive()) {
+      const sessions = State.recent || [];
+      State.cleanup = { sessions, total_bytes: sessions.reduce((sum, item) => sum + (item.size_bytes || 0) + (item.extra_bytes || 0), 0), cost_available: State.agent === "claude" };
+      renderMain();
+      return;
+    }
+    const results = await perSource("getProviderAllSessions", State.agent);
     if (ticket !== State.requestSeq.cleanup || State.view !== "cleanup") return;
-    State.cleanup = data;
+    const found = results.filter(Boolean);
+    State.cleanup = {
+      sessions: found.flatMap((item) => item.sessions || []),
+      total_bytes: found.reduce((sum, item) => sum + (item.total_bytes || 0), 0),
+      cost_available: State.agent === "claude",
+    };
     renderMain();
   }
 
@@ -409,11 +605,26 @@
     }
     renderMain();
     if (!State.tune.sessions) {
-      const all = await call("getProviderAllSessions", "claude", scope.sourceScope());
-      State.tune.sessions = (all && all.sessions) || [];
+      const results = await perSource("getProviderAllSessions", "claude");
+      State.tune.sessions = results.filter(Boolean).flatMap((item) => item.sessions || []);
     }
     await ASM.views.tune.refreshGuidance();
     renderMain();
+  }
+
+  /** Skills, agents, kills and interruptions across every session. */
+  async function loadTrace(force = false) {
+    if (!ASM.api.isLive()) return;
+    if (State.trace && !force) return;
+    const ticket = ++State.requestSeq.trace;
+    State.loading.trace = true;
+    const results = await Promise.all(scope.sourceIds().map((id) =>
+      call("getTrace", State.agent, JSON.stringify([id]), 600)));
+    if (ticket !== State.requestSeq.trace) return;
+    State.loading.trace = false;
+    const found = results.filter(Boolean);
+    State.trace = { events: found.flatMap((item) => item.events || []).sort((a, b) => (b.t || 0) - (a.t || 0)) };
+    if (State.view === "activity") renderMain();
   }
 
   /* ================================================================ */
@@ -427,6 +638,7 @@
       ((detail.scratchpad && detail.scratchpad.files) || []).length,
       (detail.goals && detail.goals.count) || 0,
       (detail.requests && detail.requests.count) || 0,
+      ((detail.trace && detail.trace.events) || []).length,
     ].join(":");
   }
 
@@ -438,7 +650,7 @@
     ASM.persist.tabs();
   }
 
-  async function openSession(projectId, sessionId) {
+  async function openSession(projectId, sessionId, options = {}) {
     closePalette();
     if (projectId && projectId !== State.projectId) {
       State.projectId = projectId;
@@ -451,11 +663,11 @@
     State.view = "session";
     State.goalIndex = null;
     State.promptIndex = null;
-    if (!["journey", "analytics", "transcript", "subagents", "tasks", "workspace", "images", "raw"].includes(State.tab)) {
-      State.tab = "journey";
-    }
-    const pane = dom.id("main-pane");
-    if (pane) pane.innerHTML = `<div class="view">${ui.skeleton("Loading session…")}</div>`;
+    if (options.tab) State.tab = options.tab;
+    if (!SESSION_TABS.includes(State.tab)) State.tab = "summary";
+    State.detail = null;
+    renderSidebar();
+    renderMain();   // header from the summary, skeleton body
 
     const session = State.sessions.find((item) => item.session_id === sessionId) || {};
     const provider = session.provider || scope.currentProvider();
@@ -471,7 +683,7 @@
     trimTranscript();
     State._detailSig = detailSignature(State.detail);
     if (session.session_id) rememberTab(session);
-    renderAll();
+    renderMain();
   }
 
   function trimTranscript() {
@@ -485,9 +697,9 @@
 
   async function toggleProject(projectId) {
     const wasOpen = State.expandedProjects.has(projectId);
-    if (wasOpen && State.projectId === projectId) {
+    if (wasOpen && State.projectId === projectId && State.view === "project") {
       State.expandedProjects.delete(projectId);
-      ASM.views.sidebar.render();
+      renderSidebar();
       return;
     }
     State.expandedProjects.add(projectId);
@@ -497,10 +709,10 @@
     State.transcript = null;
     State.view = "project";
     ASM.api.send("leaveSession");
-    ASM.views.sidebar.render();
+    renderSidebar();
     renderMain();
     await loadProjectSessions(projectId);
-    ASM.views.sidebar.render();
+    renderSidebar();
     renderMain();
   }
 
@@ -541,16 +753,13 @@
     else if (view === "monitor") await loadMonitor();
     else if (view === "cleanup") await loadCleanup();
     else if (view === "tune") await loadTune();
-    else if (view === "overview" && State.overviewDirty) await loadOverview();
+    else if (view === "activity") { renderMain(); loadTrace(); if (!State.globalStats) loadStats(); }
+    else if (view === "overview") { renderMain(); if (State.overviewDirty || !State.globalStats) { loadOverview(); loadStats(); } }
     else renderMain();
     renderChrome();
   }
 
-  async function switchAgent(provider, nextView = "") {
-    if (!ASM.AGENTS[provider] || provider === State.agent) return;
-    ASM.api.send("leaveSession");
-    State.agent = provider;
-    ASM.persist.set("agent", provider);
+  function resetScope() {
     State.projectId = null;
     State.sessionId = null;
     State.sessions = [];
@@ -560,12 +769,24 @@
     State.settings = null;
     State.cleanup = null;
     State.tune = null;
+    State.trace = null;
+    State.globalStats = null;
+    State.projects = [];
     State.expandedProjects.clear();
-    State.view = "overview";
     scope.clearSelection();
+  }
+
+  async function switchAgent(provider, nextView = "") {
+    if (!ASM.AGENTS[provider] || provider === State.agent) return;
+    ASM.api.send("leaveSession");
+    State.agent = provider;
+    ASM.persist.set("agent", provider);
+    resetScope();
+    State.view = "overview";
     renderAll();
-    await loadOverview();
-    await loadRecent(true);
+    loadOverview();
+    loadStats();
+    loadRecent(true);
     if (nextView) await navigate(nextView);
   }
 
@@ -575,22 +796,13 @@
     ASM.api.send("leaveSession");
     State.source = sourceId;
     ASM.persist.sources();
-    State.projectId = null;
-    State.sessionId = null;
-    State.sessions = [];
-    State.detail = null;
-    State.transcript = null;
-    State.recent = null;
-    State.settings = null;
-    State.cleanup = null;
-    State.tune = null;
-    State.expandedProjects.clear();
+    resetScope();
     State.view = "overview";
-    scope.clearSelection();
     renderPickers();
     renderAll();
-    await loadOverview();
-    await loadRecent(true);
+    loadOverview();
+    loadStats();
+    loadRecent(true);
   }
 
   async function toggleSource(sourceId, enabled) {
@@ -604,21 +816,23 @@
     ASM.persist.sources();
     renderPickers();
     renderMain();
-    await loadOverview();
+    loadOverview();
+    loadStats();
   }
 
   async function refreshAll() {
-    await loadOverview();
-    await loadRecent(true);
+    State.trace = null;
+    await Promise.all([loadOverview(), loadStats(), loadRecent(true)]);
     if (State.projectId) await loadProjectSessions(State.projectId);
+    if (State.view === "activity") await loadTrace(true);
     renderAll();
     ASM.toast("Data refreshed", "ok");
   }
 
   async function refreshAfterDelete() {
     State.recent = null;
-    await loadOverview();
-    await loadRecent(true);
+    State.trace = null;
+    await Promise.all([loadOverview(), loadStats(), loadRecent(true)]);
     if (State.view === "cleanup") await loadCleanup();
     else if (State.projectId) { await loadProjectSessions(State.projectId); renderAll(); }
     else renderAll();
@@ -650,9 +864,14 @@
     State.searchQuery = query;
     State.searchResults = null;
     renderMain();
-    const results = await call("searchProvider", State.agent, scope.sourceScope(), query);
+    const results = await Promise.all(scope.sourceIds().map((id) =>
+      call("searchProvider", State.agent, JSON.stringify([id]), query)));
     if (ticket !== State.requestSeq.search || State.view !== "search" || State.searchQuery !== query) return;
-    State.searchResults = results;
+    const found = results.filter(Boolean);
+    State.searchResults = found.length ? {
+      sessions: found.flatMap((item) => item.sessions || []),
+      prompts: found.flatMap((item) => item.prompts || []),
+    } : { sessions: [], prompts: [] };
     renderMain();
   }
 
@@ -825,7 +1044,7 @@
     const path = target.dataset.path;
 
     // Views own their own actions first; the shell only handles what is left.
-    for (const view of ["journey", "cleanup", "tune"]) {
+    for (const view of ["journey", "cleanup", "tune", "activity", "session"]) {
       const handler = ASM.views[view] && ASM.views[view].handle;
       if (handler && await handler(action, target)) return;
     }
@@ -837,7 +1056,7 @@
       case "toggle-project": return void toggleProject(target.dataset.id);
       case "open-session": {
         event.stopPropagation();
-        return void openSession(target.dataset.pid, target.dataset.sid);
+        return void openSession(target.dataset.pid, target.dataset.sid, { tab: target.dataset.tab || "" });
       }
       case "close-tab": {
         event.stopPropagation();
@@ -853,25 +1072,46 @@
         State.browseLimit = 120;
         State.cursorIndex = -1;
         if (State.browseMode === "recent") loadRecent();
-        ASM.views.sidebar.render();
+        renderSidebar();
         return;
       }
       case "browse-more": {
         State.browseLimit += 120;
-        dom.keepScroll(dom.id("sb-body"), () => ASM.views.sidebar.render());
+        dom.keepScroll(dom.id("sb-body"), () => renderSidebar());
         return;
       }
       case "toggle-sidebar": {
         State.sidebarCollapsed = !State.sidebarCollapsed;
         ASM.persist.set("sidebarCollapsed", State.sidebarCollapsed ? "1" : "0");
-        ASM.views.sidebar.render();
+        renderSidebar();
         dom.id("sidebar").classList.toggle("collapsed", State.sidebarCollapsed);
         if (ASM.views.journey) ASM.views.journey.redraw();
         return;
       }
       case "tab": {
         State.tab = target.dataset.tab;
+        ASM.persist.set("tab", State.tab);
         renderTab();
+        return;
+      }
+      case "period": {
+        State.period = target.dataset.value;
+        ASM.persist.set("period", State.period);
+        dom.keepScroll(dom.id("main-pane"), () => renderMain());
+        return;
+      }
+      case "breakdown": {
+        State.breakdown = target.dataset.value;
+        ASM.persist.set("breakdown", State.breakdown);
+        dom.keepScroll(dom.id("main-pane"), () => renderMain());
+        return;
+      }
+      case "sort": {
+        const key = target.dataset.key;
+        const sortScope = target.dataset.scope || State.view;
+        const current = State.sorts[sortScope] || {};
+        State.sorts[sortScope] = { key, dir: current.key === key && current.dir === "desc" ? "asc" : "desc" };
+        dom.keepScroll(dom.id("main-pane"), () => (State.view === "session" ? renderTab() : renderMain()));
         return;
       }
       case "open-memory": {
@@ -945,7 +1185,8 @@
 
       case "refresh-sources": {
         await loadSources(true);
-        await loadOverview();
+        loadOverview();
+        loadStats();
         renderMain();
         ASM.toast("Environments detected", "ok");
         return;
@@ -965,7 +1206,8 @@
         }
         ASM.persist.sources();
         renderPickers();
-        await loadOverview();
+        loadOverview();
+        loadStats();
         renderMain();
         ASM.toast("WSL sources disabled", "ok");
         return;
@@ -1077,14 +1319,20 @@
       State.sessionFilter = element.value;
       ASM.persist.set("sessionFilter", State.sessionFilter);
       State.browseLimit = 120;
-      ASM.views.sidebar.render();
+      renderSidebar();
       return;
     }
     if (element.matches("[data-role='session-sort']")) {
       State.sessionSort = element.value;
       ASM.persist.set("sessionSort", State.sessionSort);
       State.browseLimit = 120;
-      ASM.views.sidebar.render();
+      renderSidebar();
+      return;
+    }
+    if (element.matches("[data-role='trace-kind']")) {
+      State.traceFilter.kind = element.value;
+      State.traceLimit = 200;
+      renderMain();
       return;
     }
     if (element.matches("[data-role='source-toggle']")) {
@@ -1125,15 +1373,29 @@
     if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
   }, 140);
 
+  const debouncedTraceSearch = debounce(() => {
+    if (State.view !== "activity") return;
+    dom.keepScroll(dom.id("main-pane"), () => renderMain());
+    const next = dom.q("[data-role='trace-query']");
+    if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+  }, 140);
+
   document.addEventListener("input", (event) => {
     const cleanQuery = event.target.closest("[data-clean-filter='query']");
     if (cleanQuery) {
       State.cleanupFilters.query = cleanQuery.value;
       debouncedCleanupSearch();
+      return;
+    }
+    const traceQuery = event.target.closest("[data-role='trace-query']");
+    if (traceQuery) {
+      State.traceFilter.query = traceQuery.value;
+      State.traceLimit = 200;
+      debouncedTraceSearch();
     }
   });
 
-  const renderSidebarSoon = raf(() => ASM.views.sidebar.render());
+  const renderSidebarSoon = raf(() => renderSidebar());
 
   function focusSearch(global = false) {
     const input = dom.id("search");
@@ -1164,6 +1426,7 @@
     }
 
     if (event.key === "Escape") {
+      hideTip();
       if (closeShortcuts()) { event.preventDefault(); return; }
       const backdrop = dom.q(".backdrop:not([hidden])");
       if (backdrop && backdrop.id !== "command-backdrop") { backdrop.remove(); event.preventDefault(); return; }
@@ -1199,16 +1462,16 @@
       event.preventDefault();
       State.sidebarCollapsed = !State.sidebarCollapsed;
       ASM.persist.set("sidebarCollapsed", State.sidebarCollapsed ? "1" : "0");
-      ASM.views.sidebar.render();
+      renderSidebar();
       dom.id("sidebar").classList.toggle("collapsed", State.sidebarCollapsed);
       if (ASM.views.journey) ASM.views.journey.redraw();
       return;
     }
     if (ctrl && event.key === "Enter" && State.sessionId) { event.preventDefault(); await launchSession(State.sessionId); return; }
     if (ctrl && event.key === ",") { event.preventDefault(); await navigate("settings"); return; }
-    if (ctrl && ["1", "2", "3", "4"].includes(event.key)) {
+    if (ctrl && ["1", "2", "3", "4", "5"].includes(event.key)) {
       event.preventDefault();
-      await navigate(["overview", "monitor", "cleanup", "tune"][Number(event.key) - 1]);
+      await navigate(["overview", "activity", "monitor", "cleanup", "tune"][Number(event.key) - 1]);
       return;
     }
     if (ctrl && event.key === "Tab" && State.view === "session") {
@@ -1244,8 +1507,6 @@
   /* live refresh                                                      */
   /* ================================================================ */
 
-  let liveTimer = null;
-
   function indicateActivity() {
     const dotElement = dom.id("live-dot");
     const label = dom.id("live-label");
@@ -1258,6 +1519,18 @@
       if (label) label.textContent = "watching";
     }, 1300);
   }
+
+  // Machine-wide aggregates are rebuilt at most this often while sessions
+  // write continuously; the open session itself refreshes on every tick.
+  const refreshAggregates = throttle(() => {
+    if (State.view === "overview" || State.view === "activity") { loadOverview(); loadStats(); }
+    else State.overviewDirty = true;
+    if (State.browseMode === "recent" || State.view === "monitor") loadRecent(true);
+    if (State.view === "activity") loadTrace(true);
+    if (State.view === "project" && State.projectId) loadProjectSessions(State.projectId).then((ok) => { if (ok) renderAll(); });
+  }, 4000);
+
+  const refreshSession = debounce(() => runSessionRefresh(), 280);
 
   function onDataChanged(reason) {
     indicateActivity();
@@ -1279,68 +1552,68 @@
 
     const parts = String(reason || "").split(":");
     if (parts[0] === "session" && parts[1] !== "claude" && parts[1] !== "codex") parts.splice(1, 0, "claude");
-    if (parts[0] === "session" && State.projectId
-        && (parts[1] !== scope.currentProvider() || parts[2] !== State.projectId
-          || (State.sessionId && parts[3] !== State.sessionId))) {
-      State.overviewDirty = true;
-      return;
-    }
+    const provider = scope.currentProvider();
+    const nativeProject = String(State.projectId || "").split("::").pop();
+    const mine = State.view === "session" && State.sessionId && parts[0] === "session"
+      && parts[1] === provider && parts[2] === nativeProject && parts[3] === State.sessionId;
+    const codexMine = State.view === "session" && State.sessionId && parts[0] === "codex" && provider === "codex";
 
-    clearTimeout(liveTimer);
-    liveTimer = setTimeout(runLiveRefresh, 280);
+    if (mine || codexMine) refreshSession();
+    if (State.view === "monitor" && State.agent === "claude") refreshShells();
+    refreshAggregates();
   }
 
-  async function runLiveRefresh() {
+  const refreshShells = throttle(async () => {
+    State.shells = await call("getShells");
+    if (State.view === "monitor") renderMain();
+  }, 3000);
+
+  async function runSessionRefresh() {
     if (State.liveRefreshInFlight) { State.liveRefreshQueued = true; return; }
+    if (State.view !== "session" || !State.sessionId || !State.detail) return;
     State.liveRefreshInFlight = true;
+    const sessionId = State.sessionId;
     try {
-      if (State.view === "overview" && !State.projectId) {
-        await loadOverview();
-        return;
-      }
-      if (State.projectId) {
-        await loadProjectSessions(State.projectId);
-        ASM.views.sidebar.render();
-      }
-      if (State.view === "session" && State.sessionId) {
-        const provider = scope.currentProvider();
-        const detail = await call("getProviderSessionDetail", provider, State.projectId, State.sessionId);
-        if (detail && detailSignature(detail) !== State._detailSig) {
-          const pane = dom.id("main-pane");
-          const top = pane ? pane.scrollTop : 0;
-          State._detailSig = detailSignature(detail);
-          State.detail = detail;
-          const window_ = State.transcript;
-          if (window_ && window_.events.length) {
-            const lastIndex = window_.start + window_.events.length - 1;
-            const page = await call("getProviderTranscriptAfter", provider, State.projectId, State.sessionId, lastIndex);
-            if (page && page.events && page.events.length) {
-              window_.events = window_.events.concat(page.events);
-              window_.total = page.total;
-              trimTranscript();
-            }
-          } else {
-            State.transcript = {
-              events: detail.events || [], start: detail.events_start || 0, total: detail.total_events || 0,
-            };
-          }
-          renderMain();
-          if (pane) pane.scrollTop = top;
+      const provider = scope.currentProvider();
+      const meta = await call("getSessionMeta", provider, State.projectId, sessionId);
+      if (!meta || meta.error || State.sessionId !== sessionId || State.view !== "session") return;
+      if (detailSignature(meta) === State._detailSig) return;
+      const pane = dom.id("main-pane");
+      const top = pane ? pane.scrollTop : 0;
+      State._detailSig = detailSignature(meta);
+      // Keep the parts the meta call does not carry (scratchpad, images…).
+      State.detail = { ...State.detail, ...meta };
+      const window_ = State.transcript;
+      if (window_ && window_.events.length) {
+        const lastIndex = window_.start + window_.events.length - 1;
+        const page = await call("getProviderTranscriptAfter", provider, State.projectId, sessionId, lastIndex);
+        if (State.sessionId !== sessionId) return;
+        if (page && page.events && page.events.length) {
+          window_.events = window_.events.concat(page.events);
+          window_.total = page.total;
+          trimTranscript();
         }
-      } else if (State.view === "monitor" && State.agent === "claude") {
-        State.shells = await call("getShells");
-        renderMain();
       }
-      // Machine-wide aggregates are expensive on a large archive. Mark them
-      // stale and rebuild when Overview is next opened.
-      State.overviewDirty = true;
+      renderSessionHead();
+      renderTab();
+      renderStatus();
+      if (pane) pane.scrollTop = top;
     } finally {
       State.liveRefreshInFlight = false;
       if (State.liveRefreshQueued) {
         State.liveRefreshQueued = false;
-        clearTimeout(liveTimer);
-        liveTimer = setTimeout(runLiveRefresh, 280);
+        refreshSession();
       }
+    }
+  }
+
+  function onIndexProgress(event) {
+    if (!event || event.kind !== "index") return;
+    State.indexing = event;
+    renderStatus();
+    if (event.done >= event.total) {
+      clearTimeout(onIndexProgress.timer);
+      onIndexProgress.timer = setTimeout(() => { State.indexing = null; renderStatus(); }, 1200);
     }
   }
 
@@ -1400,7 +1673,7 @@
         event.target.value = "";
         State.search = "";
         if (State.view === "search") State.view = State.projectId ? "project" : "overview";
-        ASM.views.sidebar.render();
+        renderSidebar();
         renderMain();
       }
     });
@@ -1411,6 +1684,7 @@
     initPaneResizers();
     wireStaticControls();
     renderChrome();
+    renderAll();   // skeletons: every region shows its shape before data lands
 
     if (typeof QWebChannel === "undefined" || !window.qt || !window.qt.webChannelTransport) {
       bootPreview();
@@ -1421,18 +1695,21 @@
       channel.objects.backend.dataChanged.connect(onDataChanged);
       channel.objects.backend.assistantEvent.connect((payload) => ASM.views.tune.onEvent(payload));
       channel.objects.backend.updateEvent.connect(onUpdateEvent);
+      ASM.api.onIndexProgress(onIndexProgress);
 
       const info = await call("getAppInfo");
+      markTiming("channel");
       if (info && info.version) {
         State.appVersion = info.version;
         dom.id("app-version").textContent = `v${info.version}`;
       }
       document.body.classList.toggle("custom-window-controls", !!(info && info.custom_window_controls));
       call("checkForUpdate", false);
-      await loadSources();
-      await loadOverview();
-      await loadRecent(true);
-      renderAll();
+      // Everything below is independent; each paints its region when it lands.
+      loadSources();
+      loadOverview();
+      loadStats();
+      loadRecent(true);
     });
   }
 
@@ -1453,6 +1730,7 @@
     State.projects = fixtures.PROJECTS;
     State.globalStats = fixtures.GLOBAL;
     State.recent = fixtures.RECENT;
+    State.trace = { events: fixtures.TRACE };
     State.sources = [{ id: "windows", label: "Windows", kind: "local", available: true, writable: true }];
     State.enabledSources = new Set(["windows"]);
     State.source = "windows";
@@ -1462,8 +1740,8 @@
     renderAll();
   }
 
-  /** Open the fixture session, so the preview can show Journey too. */
-  function previewSession() {
+  /** Open the fixture session, so the preview can show the inspector too. */
+  function previewSession(tab = "summary") {
     const fixtures = ASM.preview;
     State.projectId = fixtures.DETAIL.project_id;
     State.sessions = fixtures.RECENT.filter((item) => item.project_id === State.projectId);
@@ -1473,16 +1751,17 @@
       events: fixtures.DETAIL.events, start: fixtures.DETAIL.events_start, total: fixtures.DETAIL.total_events,
     };
     State.view = "session";
-    State.tab = "journey";
+    State.tab = tab;
     rememberTab(State.sessions[0] || { session_id: State.sessionId, title: "Make the payment webhook idempotent" });
     renderAll();
   }
 
   ASM.router = {
-    renderAll, renderMain, renderTab, renderChrome, navigate, openSession, toggleProject,
-    selectProject, loadOverview, loadRecent, loadMemory, loadSettings, refreshAfterDelete,
-    refreshAll, launchSession, switchAgent, switchSource, initPaneResizers, showShortcuts,
-    openPalette, runGlobalSearch, focusSearch, previewSession,
+    renderAll, renderMain, renderTab, renderChrome, renderSidebar, renderSessionHead,
+    navigate, openSession, toggleProject, selectProject, loadOverview, loadStats, loadRecent,
+    loadTrace, loadMemory, loadSettings, refreshAfterDelete, refreshAll, launchSession,
+    switchAgent, switchSource, initPaneResizers, showShortcuts, openPalette, runGlobalSearch,
+    focusSearch, previewSession, hideTip,
   };
 
   if (document.readyState === "loading") window.addEventListener("load", boot);

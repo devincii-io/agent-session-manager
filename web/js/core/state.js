@@ -60,15 +60,23 @@
     cleanup: null,
     assets: null,
     tune: null,
+    trace: null,             // machine-wide skills / agents / kills / interruptions
     searchResults: null,
     searchQuery: "",
 
     /* -- selection ------------------------------------------------------ */
     projectId: null,
     sessionId: null,
-    view: "overview",        // overview | sessions | session | journey-less views…
-    tab: "journey",
+    view: "overview",        // overview | activity | monitor | cleanup | tune | settings | session | project | memory | search
+    tab: stored("tab", "summary"),
     search: "",
+
+    /* -- dashboard controls --------------------------------------------- */
+    period: stored("period", "30"),                 // 7 | 30 | 90 | all
+    breakdown: stored("breakdown", "model"),        // model | project — the spend chart's stacks
+    projectSort: "recent",                          // recent | cost | duration | errors
+    traceFilter: { kind: "", query: "" },
+    traceLimit: 200,
 
     /* -- sidebar browser ------------------------------------------------ */
     browseMode: stored("browseMode", "recent"),     // recent | projects
@@ -79,7 +87,7 @@
     browseLimit: 120,
     cursorIndex: -1,
     browseRows: [],
-    recent: [],              // all sessions across projects, for the recent list
+    recent: null,            // all sessions across projects, for the recent list
 
     /* -- session tabs --------------------------------------------------- */
     openTabs: readJSON("openTabs", []),             // [{pid, sid, title, provider}]
@@ -118,11 +126,13 @@
     overviewDirty: false,
     liveRefreshInFlight: false,
     liveRefreshQueued: false,
+    indexing: null,          // {provider, source, done, total} while the backend parses cold files
+    loading: { overview: false, stats: false, recent: false, trace: false },
     showNoise: false,
     theme: stored("theme", "dark"),
 
     /* -- stale-render guard --------------------------------------------- */
-    requestSeq: { overview: 0, project: 0, session: 0, search: 0, cleanup: 0, recent: 0 },
+    requestSeq: { overview: 0, stats: 0, project: 0, session: 0, search: 0, cleanup: 0, recent: 0, trace: 0 },
   };
 
   /* ---------- persistence helpers ---------- */
@@ -183,6 +193,12 @@
     return JSON.stringify(ids.length ? ids : ["windows"]);
   }
 
+  /** The same ids, one per call, so a slow source never delays a fast one. */
+  function sourceIds() {
+    const ids = State.source === "all" ? [...State.enabledSources] : [State.source];
+    return ids.length ? ids : ["windows"];
+  }
+
   function currentProject() {
     return State.projects.find((project) => project.id === State.projectId) || null;
   }
@@ -199,12 +215,17 @@
       (State.agent === "all" ? "claude" : State.agent);
   }
 
+  /** Whether dollar figures mean anything for what is on screen. */
+  function priced(provider) {
+    return (provider || State.agent) !== "codex";
+  }
+
   ASM.state = State;
   ASM.stored = stored;
   ASM.persist = persist;
   ASM.scope = {
     selKey, isSelected, toggleSelected, clearSelection, selectionTotals,
-    selectionItems, sourceScope, currentProject, currentSession, currentProvider,
+    selectionItems, sourceScope, sourceIds, currentProject, currentSession, currentProvider, priced,
   };
 
   ASM.AGENTS = {

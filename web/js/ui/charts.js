@@ -1,14 +1,18 @@
 /* ============================================================
    Charts, as inline SVG strings.
 
-   Two rules hold everywhere in this file:
+   Rules that hold everywhere in this file:
 
    1. No colour literals. Every fill and stroke is a CSS custom
       property, so both themes are correct without a second code
       path and a theme switch needs no redraw.
-   2. Every chart states its units. A bare number on an axis that
-      could be tokens, dollars or calls is a chart that lies by
-      omission, so the caller passes a formatter and the axis uses it.
+   2. Every chart states its units: the caller passes a formatter
+      and the axis and the hover readout use it.
+   3. Thin marks, hairline grid, a 2px surface gap between touching
+      fills, and a hover readout on every mark — carried by `data-tip`
+      attributes that one delegated handler in app.js turns into the
+      floating readout. Every value is also reachable without hover:
+      the tables and lists beside the charts repeat them.
    ============================================================ */
 
 (function (ASM) {
@@ -28,17 +32,121 @@
     if (!(value > 0)) return 1;
     const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
     const scaled = value / magnitude;
-    const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+    const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 2.5 ? 2.5 : scaled <= 5 ? 5 : 10;
     return step * magnitude;
   }
 
+  function seriesColour(index) { return `var(--series-${Math.min(8, index + 1)})`; }
+
   /**
-   * Area chart over an ordered series.
+   * Columns over an ordered axis, optionally stacked.
+   *
+   * series: [{ key, label, color, values: number[] }]
+   * options.labels: one x label per index; options.tips: one readout title
+   * per index (a date, usually); options.average: draw a trailing mean line.
+   */
+  function columns(series, options = {}) {
+    const list = (series || []).filter((entry) => entry && entry.values && entry.values.length);
+    if (!list.length) return empty(options.emptyText || "No activity recorded.");
+    const count = Math.max(...list.map((entry) => entry.values.length));
+    const width = 720;
+    const height = options.height || 150;
+    const padLeft = options.axis === false ? 6 : 44;
+    const padRight = 6;
+    const padBottom = options.labels ? 18 : 6;
+    const padTop = 8;
+    const format = options.format || fmt.num;
+    const plotWidth = width - padLeft - padRight;
+    const plotHeight = height - padTop - padBottom;
+    const gap = count > 60 ? 1 : 2;
+    const slot = plotWidth / count;
+    const barWidth = Math.max(1, Math.min(24, slot - gap));
+
+    const totals = Array.from({ length: count }, (_, index) =>
+      list.reduce((sum, entry) => sum + (Number(entry.values[index]) || 0), 0));
+    const max = niceMax(Math.max(...totals));
+    const sy = (value) => plotHeight * (value / max);
+
+    let grid = "";
+    if (options.axis !== false) {
+      grid = [0, 0.5, 1].map((fraction) => {
+        const y = padTop + plotHeight - sy(max * fraction);
+        return `<line class="grid-line" x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}"/>
+          <text class="axis-text" x="${padLeft - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${esc(format(max * fraction))}</text>`;
+      }).join("");
+    }
+
+    const bars = [];
+    const hits = [];
+    for (let index = 0; index < count; index += 1) {
+      const x = padLeft + index * slot + (slot - barWidth) / 2;
+      let stackY = padTop + plotHeight;
+      list.forEach((entry) => {
+        const value = Number(entry.values[index]) || 0;
+        if (value <= 0) return;
+        const barHeight = Math.max(1.5, sy(value));
+        const top = stackY - barHeight;
+        // A 2px surface gap separates stacked segments; the top segment gets
+        // the rounded cap and everything sits square on the baseline.
+        const isTop = stackY - barHeight <= padTop + plotHeight - sy(totals[index]) + 0.01;
+        const radius = isTop ? Math.min(4, barWidth / 2) : 0;
+        bars.push(`<path class="col" fill="${entry.color || "var(--series-1)"}" d="${roundedTop(x, top, barWidth, Math.max(0.5, barHeight - (stackY === padTop + plotHeight ? 0 : 2)), radius)}"/>`);
+        stackY = top;
+      });
+      const title = options.tips ? options.tips[index] : (options.labels ? options.labels[index] : String(index));
+      const lines = [String(title)];
+      if (list.length === 1) lines.push(format(totals[index]));
+      else {
+        lines.push(`${format(totals[index])} total`);
+        list.forEach((entry) => {
+          const value = Number(entry.values[index]) || 0;
+          if (value > 0) lines.push(`${format(value)}  ${entry.label}`);
+        });
+      }
+      hits.push(`<rect class="hit" x="${(padLeft + index * slot).toFixed(1)}" y="${padTop}" width="${slot.toFixed(1)}" height="${plotHeight}"
+        fill="transparent" data-tip="${esc(lines.join("\n"))}"/>`);
+    }
+
+    let average = "";
+    if (options.average && count > 3) {
+      const window_ = options.average === true ? 7 : Number(options.average);
+      const points = totals.map((_, index) => {
+        const from = Math.max(0, index - window_ + 1);
+        const slice = totals.slice(from, index + 1);
+        const mean = slice.reduce((sum, value) => sum + value, 0) / slice.length;
+        return `${(padLeft + index * slot + slot / 2).toFixed(1)},${(padTop + plotHeight - sy(mean)).toFixed(1)}`;
+      });
+      average = `<polyline class="avg-line" points="${points.join(" ")}"/>`;
+    }
+
+    let axis = "";
+    if (options.labels) {
+      const every = Math.max(1, Math.ceil(count / (options.labelEvery || 10)));
+      axis = options.labels.map((label, index) => (index % every === 0 || index === count - 1) && label
+        ? `<text class="axis-text" x="${(padLeft + index * slot + slot / 2).toFixed(1)}" y="${height - 4}" text-anchor="middle">${esc(String(label))}</text>`
+        : "").join("");
+    }
+    return `<div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
+      aria-label="${esc(options.ariaLabel || "Column chart")}">${grid}${bars.join("")}${average}${axis}${hits.join("")}</svg></div>`;
+  }
+
+  /** A column with rounded top corners and a flat base. */
+  function roundedTop(x, y, w, h, r) {
+    if (!(h > 0)) return "";
+    const radius = Math.min(r, h / 2, w / 2);
+    if (!radius) return `M${x.toFixed(1)},${y.toFixed(1)}h${w.toFixed(1)}v${h.toFixed(1)}h${(-w).toFixed(1)}Z`;
+    return `M${x.toFixed(1)},${(y + radius).toFixed(1)}a${radius},${radius} 0 0 1 ${radius},${-radius}h${(w - 2 * radius).toFixed(1)}a${radius},${radius} 0 0 1 ${radius},${radius}v${(h - radius).toFixed(1)}h${(-w).toFixed(1)}Z`;
+  }
+
+  /**
+   * Area chart over an ordered series with a hover band per point.
    *
    * points: [{ x:number, y:number, label?:string }]
    * The x scale is linear over the given x values, so an irregular
    * series keeps its real spacing instead of being flattened to an
    * index — a two-hour gap should look like a two-hour gap.
+   * options.marks: [{ x, label }] draws a vertical marker (a compaction).
+   * options.ceiling: a horizontal reference line (the context window).
    */
   function area(points, options = {}) {
     const data = (points || []).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
@@ -47,7 +155,8 @@
     const width = 720;
     const height = options.height || 150;
     const padLeft = options.padLeft != null ? options.padLeft : 46;
-    const padBottom = 20;
+    const padRight = 8;
+    const padBottom = options.xLabels ? 18 : 8;
     const padTop = 10;
     const colour = options.color || "var(--series-1)";
     const format = options.format || fmt.num;
@@ -55,9 +164,10 @@
     const xs = data.map((point) => point.x);
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
-    const maxY = niceMax(Math.max(...data.map((point) => point.y)));
+    const rawMax = Math.max(...data.map((point) => point.y), options.ceiling || 0);
+    const maxY = niceMax(rawMax);
 
-    const sx = (x) => padLeft + ((x - minX) / (maxX - minX || 1)) * (width - padLeft - 8);
+    const sx = (x) => padLeft + ((x - minX) / (maxX - minX || 1)) * (width - padLeft - padRight);
     const sy = (y) => height - padBottom - (y / maxY) * (height - padTop - padBottom);
 
     const line = data.map((point, index) =>
@@ -67,68 +177,55 @@
     const gradient = nextId("grad");
     const ticks = [0, 0.5, 1].map((fraction) => {
       const y = sy(maxY * fraction);
-      return `<line class="grid-line" x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - 8}" y2="${y.toFixed(1)}"/>
+      return `<line class="grid-line" x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}"/>
         <text class="axis-text" x="${padLeft - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${esc(format(maxY * fraction))}</text>`;
     }).join("");
 
-    // A dot per point would be noise on a long series; mark the ends only,
-    // and hang a native tooltip on an invisible band per point instead.
-    const hotspots = data.map((point) => {
-      const x = sx(point.x);
-      const bandWidth = (width - padLeft - 8) / data.length;
-      return `<rect x="${(x - bandWidth / 2).toFixed(1)}" y="${padTop}" width="${Math.max(1, bandWidth).toFixed(1)}"
-        height="${height - padTop - padBottom}" fill="transparent"><title>${esc(point.label || "")}${point.label ? " · " : ""}${esc(format(point.y))}</title></rect>`;
+    const ceiling = options.ceiling && options.ceiling <= maxY
+      ? `<line class="ceiling-line" x1="${padLeft}" y1="${sy(options.ceiling).toFixed(1)}" x2="${width - padRight}" y2="${sy(options.ceiling).toFixed(1)}"/>
+         <text class="axis-text" x="${width - padRight}" y="${(sy(options.ceiling) - 4).toFixed(1)}" text-anchor="end">${esc(options.ceilingLabel || format(options.ceiling))}</text>`
+      : "";
+
+    const marks = (options.marks || []).filter((mark) => Number.isFinite(mark.x)).map((mark) =>
+      `<line class="marker-line" x1="${sx(mark.x).toFixed(1)}" y1="${padTop}" x2="${sx(mark.x).toFixed(1)}" y2="${height - padBottom}"/>`).join("");
+
+    // Hover bands: each point owns the half-way to its neighbours, so a
+    // reader aims at a moment, never at a 2px line.
+    const hotspots = data.map((point, index) => {
+      const left = index ? (sx(data[index - 1].x) + sx(point.x)) / 2 : padLeft;
+      const right = index < data.length - 1 ? (sx(data[index + 1].x) + sx(point.x)) / 2 : width - padRight;
+      const tip = `${point.label || ""}${point.label ? "\n" : ""}${format(point.y)}${point.extra ? "\n" + point.extra : ""}`;
+      return `<g class="hit-band"><rect x="${left.toFixed(1)}" y="${padTop}" width="${Math.max(1, right - left).toFixed(1)}"
+        height="${height - padTop - padBottom}" fill="transparent" data-tip="${esc(tip)}"/>
+        <circle class="hover-dot" cx="${sx(point.x).toFixed(1)}" cy="${sy(point.y).toFixed(1)}" r="4" fill="${colour}"/></g>`;
     }).join("");
+
+    let xAxis = "";
+    if (options.xLabels) {
+      // Labels go where there is room, not every Nth point: an irregular
+      // series would otherwise pile them up where the points are dense.
+      let lastX = -Infinity;
+      xAxis = data.map((point, index) => {
+        const x = sx(point.x);
+        if (!point.label || x - lastX < 84 || x > width - padRight - 30) return "";
+        lastX = x;
+        return `<text class="axis-text" x="${x.toFixed(1)}" y="${height - 4}" text-anchor="${index === 0 ? "start" : "middle"}">${esc(point.label)}</text>`;
+      }).join("");
+    }
 
     const last = data[data.length - 1];
     return `<div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
       aria-label="${esc(options.ariaLabel || "Trend chart")}">
       <defs><linearGradient id="${gradient}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="${colour}" stop-opacity="0.30"/>
-        <stop offset="1" stop-color="${colour}" stop-opacity="0"/></linearGradient></defs>
-      ${ticks}
+        <stop offset="0" stop-color="${colour}" stop-opacity="0.22"/>
+        <stop offset="1" stop-color="${colour}" stop-opacity="0.02"/></linearGradient></defs>
+      ${ticks}${ceiling}
       <path d="${fill}" fill="url(#${gradient})"/>
       <path class="series-line" d="${line}" stroke="${colour}"/>
-      <circle class="series-dot" cx="${sx(last.x).toFixed(1)}" cy="${sy(last.y).toFixed(1)}" r="3" fill="${colour}"/>
-      ${hotspots}
+      ${marks}
+      <circle class="series-dot" cx="${sx(last.x).toFixed(1)}" cy="${sy(last.y).toFixed(1)}" r="4" fill="${colour}"/>
+      ${xAxis}${hotspots}
     </svg></div>`;
-  }
-
-  /** Column chart for histograms — hours of the day, values per turn. */
-  function columns(values, options = {}) {
-    const data = (values || []).map((value) => Number(value) || 0);
-    if (!data.length) return empty(options.emptyText || "No activity recorded.");
-
-    const width = 720;
-    const height = options.height || 110;
-    const padBottom = options.labels ? 18 : 6;
-    const padTop = 6;
-    const colour = options.color || "var(--series-2)";
-    const max = Math.max(1, ...data);
-    const gap = data.length > 60 ? 1 : 2;
-    const barWidth = (width - gap * data.length) / data.length;
-    const format = options.format || fmt.num;
-
-    const bars = data.map((value, index) => {
-      const barHeight = value > 0 ? Math.max(2, (value / max) * (height - padTop - padBottom)) : 0;
-      const x = index * (barWidth + gap);
-      const y = height - padBottom - barHeight;
-      const label = options.labels ? options.labels[index] : index;
-      return `<rect class="col" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}"
-        height="${barHeight.toFixed(1)}" rx="1.5" fill="${colour}" opacity="${value ? 0.88 : 0.2}">
-        <title>${esc(String(label))}: ${esc(format(value))}</title></rect>`;
-    }).join("");
-
-    let axis = "";
-    if (options.labels) {
-      const every = Math.max(1, Math.ceil(data.length / 12));
-      axis = options.labels.map((label, index) => index % every === 0
-        ? `<text class="axis-text" x="${(index * (barWidth + gap) + barWidth / 2).toFixed(1)}"
-             y="${height - 4}" text-anchor="middle">${esc(String(label))}</text>`
-        : "").join("");
-    }
-    return `<div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
-      aria-label="${esc(options.ariaLabel || "Column chart")}">${bars}${axis}</svg></div>`;
   }
 
   /** Donut with a readable centre — the total the slices add up to. */
@@ -136,20 +233,21 @@
     const data = (items || []).filter((item) => item.value > 0);
     if (!data.length) return empty(options.emptyText || "Nothing to break down.");
     const total = data.reduce((sum, item) => sum + item.value, 0);
-    const size = options.size || 128;
-    const radius = size / 2 - 9;
+    const size = options.size || 120;
+    const radius = size / 2 - 8;
     const circumference = 2 * Math.PI * radius;
+    const gap = data.length > 1 ? 2 : 0;
     let offset = 0;
 
     const rings = data.map((item, index) => {
       const fraction = item.value / total;
+      const length = Math.max(0, fraction * circumference - gap);
       const segment = `<circle r="${radius}" cx="${size / 2}" cy="${size / 2}" fill="none"
-        stroke="${item.color || `var(--series-${(index % 8) + 1})`}" stroke-width="14"
-        stroke-dasharray="${(fraction * circumference).toFixed(2)} ${circumference.toFixed(2)}"
+        stroke="${item.color || seriesColour(index)}" stroke-width="12"
+        stroke-dasharray="${length.toFixed(2)} ${(circumference - length).toFixed(2)}"
         stroke-dashoffset="${(-offset * circumference).toFixed(2)}"
-        transform="rotate(-90 ${size / 2} ${size / 2})">
-        <title>${esc(item.label)}: ${esc(options.format ? options.format(item.value) : fmt.num(item.value))} (${(100 * fraction).toFixed(0)}%)</title>
-      </circle>`;
+        transform="rotate(-90 ${size / 2} ${size / 2})"
+        data-tip="${esc(item.label)}\n${esc(options.format ? options.format(item.value) : fmt.num(item.value))} · ${(100 * fraction).toFixed(0)}%"/>`;
       offset += fraction;
       return segment;
     }).join("");
@@ -162,7 +260,7 @@
     return `<div class="donut" style="width:${size}px;height:${size}px">
       <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img"
         aria-label="${esc(options.ariaLabel || "Composition")}">
-        <circle class="ring-track" r="${radius}" cx="${size / 2}" cy="${size / 2}" fill="none" stroke-width="14"/>
+        <circle class="ring-track" r="${radius}" cx="${size / 2}" cy="${size / 2}" fill="none" stroke-width="12"/>
         ${rings}</svg>${centre}</div>`;
   }
 
@@ -171,25 +269,29 @@
     const data = (values || []).map((value) => Number(value) || 0);
     if (data.length < 2) return "";
     const width = 120;
-    const height = 22;
+    const height = 24;
     const max = Math.max(1, ...data);
     const step = width / (data.length - 1);
     const colour = options.color || "var(--series-1)";
     const line = data.map((value, index) =>
-      `${index ? "L" : "M"}${(index * step).toFixed(1)},${(height - 1 - (value / max) * (height - 3)).toFixed(1)}`).join(" ");
-    return `<div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-      <path class="series-line" d="${line}" stroke="${colour}" stroke-width="1.5"/></svg></div>`;
+      `${index ? "L" : "M"}${(index * step).toFixed(1)},${(height - 2 - (value / max) * (height - 5)).toFixed(1)}`).join(" ");
+    const last = data[data.length - 1];
+    return `<div class="chart spark"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+      <path class="series-line" d="${line}" stroke="${colour}" stroke-width="1.5"/>
+      <circle class="series-dot" cx="${width}" cy="${(height - 2 - (last / max) * (height - 5)).toFixed(1)}" r="2.5" fill="${colour}"/></svg></div>`;
   }
 
   /**
-   * Contribution calendar. `days` is [[YYYY-MM-DD, count], …] oldest first.
-   * Levels are quartiles of the non-zero counts, so a quiet month still
-   * shows contrast instead of collapsing to one shade.
+   * Contribution calendar. `days` is [{d, value, tip}] oldest first (or the
+   * legacy [[date, count]] pairs). Levels are quartiles of the non-zero
+   * values, so a quiet month still shows contrast.
    */
   function calendar(days, options = {}) {
-    const data = (days || []).map(([date, count]) => [date, Number(count) || 0]);
+    const data = (days || []).map((entry) => Array.isArray(entry)
+      ? { d: entry[0], value: Number(entry[1]) || 0 }
+      : { d: entry.d, value: Number(entry.value) || 0, tip: entry.tip });
     if (!data.length) return empty("No activity recorded yet.");
-    const nonZero = data.map(([, count]) => count).filter(Boolean).sort((a, b) => a - b);
+    const nonZero = data.map((entry) => entry.value).filter(Boolean).sort((a, b) => a - b);
     const quartile = (fraction) => nonZero.length ? nonZero[Math.min(nonZero.length - 1, Math.floor(nonZero.length * fraction))] : 0;
     const cuts = [quartile(0.25), quartile(0.5), quartile(0.85)];
     const level = (count) => {
@@ -199,21 +301,20 @@
       if (count <= cuts[2]) return 3;
       return 4;
     };
+    const format = options.format || ((value) => `${value} session${value === 1 ? "" : "s"}`);
 
     // Pad the first week so columns line up with real weekdays.
-    const first = new Date(data[0][0] + "T00:00:00");
+    const first = new Date(data[0].d + "T00:00:00");
     const lead = (first.getDay() + 6) % 7;   // Monday-first
     const cells = Array.from({ length: lead }, () => null).concat(data);
     const weeks = [];
     for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
 
-    // A month label above the week where that month starts, so a 90-day strip
-    // can be read as dates rather than as an anonymous run of squares.
     let lastMonth = -1;
     const months = weeks.map((week) => {
-      const first = week.find(Boolean);
-      if (!first) return `<div class="cal-month"></div>`;
-      const date = new Date(first[0] + "T00:00:00");
+      const firstCell = week.find(Boolean);
+      if (!firstCell) return `<div class="cal-month"></div>`;
+      const date = new Date(firstCell.d + "T00:00:00");
       if (date.getMonth() === lastMonth) return `<div class="cal-month"></div>`;
       lastMonth = date.getMonth();
       return `<div class="cal-month">${esc(date.toLocaleDateString(undefined, { month: "short" }))}</div>`;
@@ -221,19 +322,15 @@
 
     const grid = weeks.map((week) => `<div class="cal-week">${
       week.map((cell) => cell
-        ? `<span class="cal-day" data-level="${level(cell[1])}" title="${esc(cell[0])}: ${cell[1]} session${cell[1] === 1 ? "" : "s"}"></span>`
+        ? `<span class="cal-day" data-level="${level(cell.value)}" data-tip="${esc(cell.tip || `${fmt.day(cell.d + "T00:00:00")}\n${format(cell.value)}`)}"></span>`
         : `<span class="cal-day" style="visibility:hidden"></span>`).join("")
     }</div>`).join("");
 
-    const total = data.reduce((sum, [, count]) => sum + count, 0);
-    const busiest = data.reduce((best, entry) => (entry[1] > best[1] ? entry : best), data[0]);
-    const legend = `<div class="cal-legend">
-      <span>${total} session${total === 1 ? "" : "s"} · busiest ${esc(busiest[0])} with ${busiest[1]}</span>
-      <span class="spacer"></span><span>less</span>
-      ${[0, 1, 2, 3, 4].map((n) => `<span class="cal-day" data-level="${n}"></span>`).join("")}<span>more</span></div>`;
     return `<div class="calendar-wrap" role="img" aria-label="${esc(options.ariaLabel || "Daily activity")}">
       <div class="cal-months">${months}</div>
-      <div class="calendar">${grid}</div>${legend}</div>`;
+      <div class="calendar">${grid}</div>
+      <div class="cal-legend"><span class="spacer"></span><span>less</span>
+        ${[0, 1, 2, 3, 4].map((n) => `<span class="cal-day" data-level="${n}"></span>`).join("")}<span>more</span></div></div>`;
   }
 
   /** Weekday x hour heatmap: when the work actually happens. */
@@ -251,6 +348,7 @@
       if (count <= cuts[2]) return 3;
       return 4;
     };
+    const unit = options.unit || "turns";
     const names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let html = `<div class="heat" role="img" aria-label="${esc(options.ariaLabel || "Activity by weekday and hour")}">`;
     html += `<span></span>`;
@@ -261,11 +359,11 @@
       html += `<span class="h-label">${names[day]}</span>`;
       row.slice(0, 24).forEach((count, hour) => {
         html += `<span class="h-cell" data-level="${level(count)}"
-          title="${names[day]} ${String(hour).padStart(2, "0")}:00 — ${count} session${count === 1 ? "" : "s"}"></span>`;
+          data-tip="${names[day]} ${String(hour).padStart(2, "0")}:00\n${count} ${unit}"></span>`;
       });
     });
     return html + "</div>";
   }
 
-  ASM.charts = { area, columns, donut, sparkline, calendar, heatmap, empty, niceMax };
+  ASM.charts = { area, columns, donut, sparkline, calendar, heatmap, empty, niceMax, seriesColour };
 })(window.ASM = window.ASM || {});

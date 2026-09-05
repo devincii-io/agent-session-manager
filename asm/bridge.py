@@ -1,55 +1,128 @@
 """QWebChannel bridge: the single object exposed to the JavaScript frontend.
 
-Slots return JSON strings (parsed in JS) to sidestep nested-QVariant conversion
-quirks. Filesystem changes are debounced into a single ``dataChanged`` signal so
-the UI can refresh live without redrawing on every byte appended to a transcript.
+Two ways in, one way out:
+
+* ``invoke(request_id, method, args_json)`` is what the frontend uses. It
+  returns at once; the named method runs on a worker thread and its JSON
+  result comes back through the ``replied`` signal. The GUI thread never
+  blocks on a scan, so the window stays responsive and filesystem events keep
+  flowing while a cold index or a WSL walk is under way. Anything that must
+  touch Qt objects (the assistant's ``QProcess``, the window) runs inline on
+  the GUI thread instead.
+* The plain slots below still exist and still return JSON strings, for older
+  callers and for tests. They run synchronously on whichever thread calls them.
+
+Every scanner is wrapped in a lock, so two workers never interleave inside one
+scanner's incremental state, while a Claude parse and a Codex parse can run at
+the same time. Signals that face the web channel are always emitted from the
+GUI thread: worker threads hand their payloads over through an internal queued
+signal rather than emitting to the channel directly.
+
+Filesystem changes are debounced into a single ``dataChanged`` signal so the UI
+can refresh live without redrawing on every byte appended to a transcript.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import platform
+import queue
 import threading
 import time
 from collections import Counter
+from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QProcess, Qt, QTimer, Signal, Slot
 
 from . import __version__, actions, assistant, paths
 from . import update as updater
-from .scanner import Scanner
+from .scanner import INDEX_TTL_SECONDS, Scanner
 from .codex_scanner import CodexScanner
-from .sources import Source, discover_sources, refresh_sources, source_by_id
+from .sources import Source, discover_sources, local_source, refresh_sources, source_by_id
 from .watcher import Watcher
+
+WORKER_THREADS = 2
+PROGRESS_INTERVAL = 0.08  # seconds between progress emits per source
+
+#: Aggregate work that can wait behind whatever the user is looking at.
+_BACKGROUND = {
+    "getProviderGlobalStats", "getProviderAllSessions", "getStorageAssets", "getTrace",
+    "searchProvider", "getSources", "refreshSources", "getAllSessions", "getGlobalStats",
+}
+#: Methods that touch Qt objects, or are trivial; they run inline on the GUI thread.
+_MAIN_THREAD = {
+    "getAppInfo", "startAssistant", "cancelAssistant", "windowMinimize", "windowClose",
+    "leaveSession", "checkForUpdate", "installUpdate", "openReleasePage",
+}
+#: When a newer request for one of these arrives before an older one has
+#: started, the older one is answered as stale without doing its work.
+_COALESCE = {
+    "getProviderSessionDetail", "getSessionMeta", "getProviderSessions", "getProviderOverview",
+    "getProviderGlobalStats", "getProviderAllSessions", "searchProvider", "getTrace",
+}
 
 
 def _j(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+class _Guarded:
+    """A scanner behind a re-entrant lock, so a worker never interleaves with
+    another inside its incremental state."""
+
+    def __init__(self, target) -> None:
+        self._target = target
+        self._lock = threading.RLock()
+
+    def __getattr__(self, name):
+        attr = getattr(self._target, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            with self._lock:
+                return attr(*args, **kwargs)
+
+        return call
+
+
 class Bridge(QObject):
     dataChanged = Signal(str)      # emitted (debounced) when the filesystem changes
     assistantEvent = Signal(str)   # async result of a claude-CLI job (JSON)
     updateEvent = Signal(str)      # async release check/download result (JSON)
+    replied = Signal(str, str)     # (request_id, JSON) — the answer to invoke()
+    progress = Signal(str)         # JSON: indexing progress for the status bar
+
+    # Worker threads hand results to the GUI thread through these; the
+    # queued connection is what keeps the web channel single-threaded.
+    _deliverReply = Signal(str, str)
+    _deliverEvent = Signal(str, str)
 
     def __init__(self, scanner: Scanner, watcher: Watcher) -> None:
         super().__init__()
-        self._scanner = scanner
-        self._codex = CodexScanner()
-        local = discover_sources()[0]
+        local = local_source()
         self._local_source_id = local.id
-        self._source_scanners: dict[str, tuple[Scanner, CodexScanner]] = {
-            local.id: (scanner, self._codex)
+        self._scanner = _Guarded(scanner)
+        self._codex = _Guarded(CodexScanner(on_progress=self._on_progress, index_ttl=INDEX_TTL_SECONDS))
+        scanner.on_progress = self._on_progress
+        scanner.index_ttl = INDEX_TTL_SECONDS
+        self._source_scanners: dict[str, tuple[_Guarded, _Guarded]] = {
+            local.id: (self._scanner, self._codex)
         }
+        self._source_lock = threading.Lock()
         self._watcher = watcher
         self._window = None  # set by the application shell
         self._open_session: tuple[str, str, str, str] | None = None
+        self._open_lock = threading.Lock()
         self._pending_reason: str | None = None
         self._jobs: dict[str, tuple[QProcess, str, QTimer]] = {}
         self._update_busy = False
+        self._progress_at: dict[str, float] = {}
+
+        self._deliverReply.connect(self._on_deliver_reply, Qt.ConnectionType.QueuedConnection)
+        self._deliverEvent.connect(self._on_deliver_event, Qt.ConnectionType.QueuedConnection)
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -63,22 +136,111 @@ class Bridge(QObject):
         self._max_wait.timeout.connect(self._flush)
         self._watcher.fileEvent.connect(self._on_fs_event)
 
+        # -- the worker pool ------------------------------------------------ #
+        self._queue: queue.PriorityQueue = queue.PriorityQueue()
+        self._seq = 0
+        self._latest: dict[str, str] = {}
+        self._workers = [
+            threading.Thread(target=self._work, name=f"asm-worker-{index}", daemon=True)
+            for index in range(WORKER_THREADS)
+        ]
+        for worker in self._workers:
+            worker.start()
+
+    # -- async lane --------------------------------------------------------- #
+
+    @Slot(str, str, str)
+    def invoke(self, request_id: str, method: str, args_json: str) -> None:
+        """Run ``method`` off the GUI thread; the result arrives via ``replied``."""
+        try:
+            args = json.loads(args_json) if args_json else []
+        except json.JSONDecodeError:
+            args = []
+        if not isinstance(args, list):
+            args = [args]
+        target = getattr(self, method, None) if not method.startswith("_") else None
+        if target is None or not callable(target):
+            self.replied.emit(request_id, _j({"ok": False, "error": f"unknown method {method}"}))
+            return
+        if method in _MAIN_THREAD:
+            try:
+                result = target(*args)
+            except Exception as exc:  # noqa: BLE001
+                result = _j({"ok": False, "error": str(exc)})
+            self.replied.emit(request_id, result if isinstance(result, str) else _j(result))
+            return
+        if method in _COALESCE:
+            self._latest[method] = request_id
+        priority = 1 if method in _BACKGROUND else 0
+        self._seq += 1
+        self._queue.put((priority, self._seq, request_id, method, args))
+
+    def _work(self) -> None:
+        while True:
+            _priority, _seq, request_id, method, args = self._queue.get()
+            if method is None:
+                return
+            if method in _COALESCE and self._latest.get(method) != request_id:
+                self._deliverReply.emit(request_id, _j({"stale": True}))
+                continue
+            try:
+                result = getattr(self, method)(*args)
+            except Exception as exc:  # noqa: BLE001
+                result = _j({"ok": False, "error": str(exc)})
+            if not isinstance(result, str):
+                result = _j(result)
+            self._deliverReply.emit(request_id, result)
+
+    def _on_deliver_reply(self, request_id: str, payload: str) -> None:
+        self.replied.emit(request_id, payload)
+
+    def _on_deliver_event(self, kind: str, payload: str) -> None:
+        if kind == "progress":
+            self.progress.emit(payload)
+        elif kind == "update":
+            self.updateEvent.emit(payload)
+
+    def _on_progress(self, event: dict) -> None:
+        """Called by a scanner on a worker thread while it parses cold files."""
+        key = f"{event.get('source')}:{event.get('provider')}"
+        now = time.monotonic()
+        finished = event.get("done") == event.get("total")
+        if not finished and now - self._progress_at.get(key, 0.0) < PROGRESS_INTERVAL:
+            return
+        self._progress_at[key] = now
+        self._deliverEvent.emit("progress", _j(event))
+
+    def shutdown(self) -> None:
+        """Flush caches and let the workers exit; called on application quit."""
+        for _index in self._workers:
+            self._queue.put((-1, 0, "", None, []))
+        for pair in list(self._source_scanners.values()):
+            for scanner in pair:
+                try:
+                    scanner.flush()
+                except Exception:
+                    pass
+
     # -- source registry --------------------------------------------------- #
 
-    def _source_pair(self, source_id: str) -> tuple[Source, Scanner, CodexScanner] | None:
+    def _source_pair(self, source_id: str) -> tuple[Source, _Guarded, _Guarded] | None:
         source = source_by_id(source_id, resolve=True)
         if source is None or not source.available or not source.resolved:
             return None
-        pair = self._source_scanners.get(source.id)
-        if pair is None:
-            pair = (
-                Scanner(source.claude_home, cache_namespace=source.id, temp_roots=source.temp_roots),
-                CodexScanner(source.codex_home),
-            )
-            self._source_scanners[source.id] = pair
+        with self._source_lock:
+            pair = self._source_scanners.get(source.id)
+            if pair is None:
+                pair = (
+                    _Guarded(Scanner(source.claude_home, cache_namespace=source.id,
+                                     temp_roots=source.temp_roots, on_progress=self._on_progress,
+                                     index_ttl=INDEX_TTL_SECONDS)),
+                    _Guarded(CodexScanner(source.codex_home, cache_namespace=source.id,
+                                          on_progress=self._on_progress, index_ttl=INDEX_TTL_SECONDS)),
+                )
+                self._source_scanners[source.id] = pair
         return source, pair[0], pair[1]
 
-    def _scope(self, scope_json: str) -> list[tuple[Source, Scanner, CodexScanner]]:
+    def _scope(self, scope_json: str) -> list[tuple[Source, _Guarded, _Guarded]]:
         try:
             requested = json.loads(scope_json) if scope_json else [self._local_source_id]
         except (json.JSONDecodeError, TypeError):
@@ -156,6 +318,8 @@ class Bridge(QObject):
         self._max_wait.stop()
         reason = self._pending_reason or "fs"
         self._pending_reason = None
+        # The memoised walks are stale now; the next aggregate call re-lists.
+        self._invalidate_all()
         self.dataChanged.emit(reason)
 
     # -- read slots --------------------------------------------------------- #
@@ -199,6 +363,8 @@ class Bridge(QObject):
             "version": __version__,
             "platform": platform.system().lower(),
             "custom_window_controls": platform.system() == "Linux" and bool(os.environ.get("WSL_DISTRO_NAME")),
+            "local_source": self._local_source_id,
+            "async": True,
         })
 
     @Slot(bool, result=str)
@@ -228,7 +394,7 @@ class Bridge(QObject):
             payload = {"ok": False, "kind": kind, "error": str(exc)}
         finally:
             self._update_busy = False
-        self.updateEvent.emit(_j(payload))
+        self._deliverEvent.emit("update", _j(payload))
 
     @Slot(str, result=str)
     def getSessions(self, project_id: str) -> str:
@@ -249,8 +415,7 @@ class Bridge(QObject):
 
     @Slot(str, str, result=str)
     def getSessionDetail(self, project_id: str, session_id: str) -> str:
-        if self._open_session and self._open_session != (self._local_source_id, "claude", project_id, session_id):
-            self._release_open_session()
+        self._track_open((self._local_source_id, "claude", project_id, session_id))
         project_path = self._scanner.project_path(project_id)
         jsonl = paths.projects_dir() / project_id / f"{session_id}.jsonl"
         data = self._scanner.detail(jsonl) if jsonl.is_file() else {"events": [], "error": "not found"}
@@ -262,7 +427,6 @@ class Bridge(QObject):
         data["session_id"] = session_id
         data["project_id"] = project_id
         # Live-watch this session's workspace while it's open.
-        self._open_session = (self._local_source_id, "claude", project_id, session_id)
         self._watcher.watch_scratchpad(scratch.get("dir") or None)
         return _j(data)
 
@@ -273,8 +437,7 @@ class Bridge(QObject):
         if pair is None:
             return _j({"events": [], "error": "Source unavailable"})
         source, claude, codex = pair
-        if self._open_session and self._open_session != (source_id, provider, native_id, session_id):
-            self._release_open_session()
+        self._track_open((source_id, provider, native_id, session_id))
         if provider == "codex":
             data = codex.detail(native_id, session_id)
             path = codex.session_path(native_id, session_id)
@@ -299,13 +462,34 @@ class Bridge(QObject):
             if source_id == self._local_source_id:
                 self._watcher.watch_scratchpad(data["scratchpad"].get("dir") or None)
         data.update({"source_id": source.id, "source_label": source.label, "source_kind": source.kind})
-        self._open_session = (source_id, provider, native_id, session_id)
         return _j(data)
 
-    def _release_open_session(self) -> None:
-        if not self._open_session:
-            return
-        source_id, provider, project_id, session_id = self._open_session
+    @Slot(str, str, str, result=str)
+    def getSessionMeta(self, provider: str, project_id: str, session_id: str) -> str:
+        """Aggregates only — what a live refresh of an open session needs."""
+        source_id, native_id = self._split_project_id(project_id)
+        pair = self._source_pair(source_id)
+        if pair is None:
+            return _j({"error": "Source unavailable"})
+        _source, claude, codex = pair
+        if provider == "codex":
+            data = codex.detail_meta(native_id, session_id)
+        else:
+            jsonl = claude.projects_root / native_id / f"{session_id}.jsonl"
+            data = claude.detail_meta(jsonl) if jsonl.is_file() else {"error": "not found"}
+            data["tasks"] = claude.get_tasks(session_id)
+        data.update({"session_id": session_id, "project_id": project_id, "provider": provider})
+        return _j(data)
+
+    def _track_open(self, key: tuple[str, str, str, str]) -> None:
+        with self._open_lock:
+            previous = self._open_session
+            self._open_session = key
+        if previous and previous != key:
+            self._release(previous)
+
+    def _release(self, key: tuple[str, str, str, str]) -> None:
+        source_id, provider, project_id, session_id = key
         pair = self._source_pair(source_id)
         if pair is None:
             return
@@ -318,9 +502,11 @@ class Bridge(QObject):
     @Slot()
     def leaveSession(self) -> None:
         """Release session-specific watches when the inspector is closed."""
-        if self._open_session:
-            self._release_open_session()
-        self._open_session = None
+        with self._open_lock:
+            previous = self._open_session
+            self._open_session = None
+        if previous:
+            self._release(previous)
         self._watcher.watch_scratchpad(None)
 
     @Slot(str, str, int, int, result=str)
@@ -383,44 +569,25 @@ class Bridge(QObject):
 
     @Slot(str, str, result=str)
     def getProviderGlobalStats(self, provider: str, source_scope: str) -> str:
-        stats: list[tuple[str, str, dict]] = []
+        rows: list[tuple[str, str, dict]] = []
         for source, claude, codex in self._scope(source_scope):
             if provider in {"claude", "all"}:
-                stats.append((source.id, "claude", claude.global_stats()))
+                rows.append((source.id, "claude", claude.global_stats()))
             if provider in {"codex", "all"}:
-                stats.append((source.id, "codex", codex.global_stats()))
-        usage = {}
-        by_model = {}
-        tools: Counter = Counter()
-        days: Counter = Counter()
-        heat = [[0] * 24 for _ in range(7)]
-        result = {
-            "provider": provider, "cost": 0.0,
-            "cost_available": provider == "claude", "usage": usage,
-            "by_model": by_model, "tool_counts": {}, "sessions_by_day": [],
-            "activity": heat, "sources": [],
-        }
-        for source_id, agent, data in stats:
-            result["sources"].append({"source_id": source_id, "provider": agent, "sessions": data.get("sessions", 0)})
-            if agent == "claude":
-                result["cost"] += float(data.get("cost", 0) or 0)
-            for key, value in data.get("usage", {}).items():
-                usage[key] = int(usage.get(key, 0)) + int(value or 0)
-            for model, values in data.get("by_model", {}).items():
-                bucket = by_model.setdefault(model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0, "cost": 0.0})
-                for key in ("input", "output", "cache_read", "cache_write", "reasoning_output", "total"):
-                    bucket[key] = bucket.get(key, 0) + int(values.get(key, 0) or 0)
-                bucket["cost"] += float(values.get("cost", 0) or 0)
-            tools.update(data.get("tool_counts", {}))
-            days.update(dict(data.get("sessions_by_day", [])))
-            for row, source_row in zip(heat, data.get("activity") or []):
-                for hour, count in enumerate(source_row[:24]):
-                    row[hour] += int(count or 0)
-            for key in ("sessions", "active", "prompts", "turns", "tool_calls", "subagent_sessions"):
-                result[key] = int(result.get(key, 0)) + int(data.get(key, 0) or 0)
-        result["tool_counts"] = dict(tools.most_common(24))
-        result["sessions_by_day"] = sorted(days.items())[-90:]
-        return _j(result)
+                rows.append((source.id, "codex", codex.global_stats()))
+        return _j(_merge_stats(provider, rows))
+
+    @Slot(str, str, int, result=str)
+    def getTrace(self, provider: str, source_scope: str, limit: int) -> str:
+        """Skills invoked, agents spawned, kills and interruptions, machine-wide."""
+        events: list[dict] = []
+        limit = max(50, min(int(limit or 500), 5000))
+        for source, claude, codex in self._scope(source_scope):
+            scanners = (("claude", claude), ("codex", codex)) if provider == "all" else ((provider, codex if provider == "codex" else claude),)
+            for agent, scanner in scanners:
+                events.extend(self._decorate(item, source, agent) for item in scanner.trace_events(limit))
+        events.sort(key=lambda row: row.get("t", 0), reverse=True)
+        return _j({"provider": provider, "events": events[:limit], "limit": limit})
 
     @Slot(result=str)
     def getAllSessions(self) -> str:
@@ -573,7 +740,16 @@ class Bridge(QObject):
                 result = actions.delete_session(native_pid, sid, purge) if source.id == self._local_source_id else {"ok": False, "error": "WSL Claude cleanup is read-only for safety"}
             results.append({"provider": provider, "source_id": source_id, "project_id": pid, "session_id": sid, **result})
         completed = sum(1 for item in results if item.get("ok"))
+        self._invalidate_all()
         return _j({"ok": completed > 0, "completed": completed, "count": len(results), "results": results})
+
+    def _invalidate_all(self) -> None:
+        for pair in list(self._source_scanners.values()):
+            for scanner in pair:
+                try:
+                    scanner.invalidate()
+                except Exception:
+                    pass
 
     @Slot(str, result=str)
     def deleteStorageAssets(self, items_json: str) -> str:
@@ -598,6 +774,7 @@ class Bridge(QObject):
                 result = actions.delete_inventory_path(item["path"], allowed) if item and not item.get("protected") else {"ok": False, "error": "Asset is protected or no longer present"}
             results.append({**req, **result})
         completed = sum(1 for item in results if item.get("ok"))
+        self._invalidate_all()
         return _j({"ok": completed > 0, "completed": completed, "count": len(results), "results": results})
 
     @Slot(str, str, result=str)
@@ -780,3 +957,85 @@ class Bridge(QObject):
     @Slot(result=str)
     def uninstallStatusline(self) -> str:
         return _j(actions.uninstall_statusline_capture())
+
+
+# --------------------------------------------------------------------------- #
+# Aggregation across sources and providers                                     #
+# --------------------------------------------------------------------------- #
+
+_EMPTY_DAY = {"cost": 0.0, "tokens": 0, "turns": 0, "prompts": 0, "errors": 0, "active_ms": 0, "sessions": 0}
+
+
+def _merge_stats(provider: str, rows: list[tuple[str, str, dict]]) -> dict:
+    """Fold per-source, per-provider stats into one payload.
+
+    Kept as a module function so it can be exercised without Qt.
+    """
+    usage: dict = {}
+    by_model: dict = {}
+    tools: Counter = Counter()
+    days: Counter = Counter()
+    daily: dict[str, dict] = {}
+    heat = [[0] * 24 for _ in range(7)]
+    by_project: list[dict] = []
+    tables: dict[str, dict] = {"skills": {}, "agents": {}, "commands": {}}
+    result: dict = {
+        "provider": provider, "cost": 0.0,
+        "cost_available": provider == "claude", "usage": usage,
+        "by_model": by_model, "tool_counts": {}, "sessions_by_day": [],
+        "activity": heat, "sources": [], "first_activity": "",
+    }
+    for source_id, agent, data in rows:
+        result["sources"].append({"source_id": source_id, "provider": agent, "sessions": data.get("sessions", 0)})
+        if agent == "claude":
+            result["cost"] += float(data.get("cost", 0) or 0)
+        for key, value in data.get("usage", {}).items():
+            usage[key] = int(usage.get(key, 0)) + int(value or 0)
+        for model, values in data.get("by_model", {}).items():
+            bucket = by_model.setdefault(model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0, "cost": 0.0, "provider": agent})
+            for key in ("input", "output", "cache_read", "cache_write", "reasoning_output", "total"):
+                bucket[key] = bucket.get(key, 0) + int(values.get(key, 0) or 0)
+            bucket["cost"] += float(values.get("cost", 0) or 0)
+        tools.update(data.get("tool_counts", {}))
+        days.update(dict(data.get("sessions_by_day", [])))
+        for row, source_row in zip(heat, data.get("activity") or []):
+            for hour, count in enumerate(source_row[:24]):
+                row[hour] += int(count or 0)
+        for key in ("sessions", "active", "prompts", "turns", "tool_calls", "subagent_sessions",
+                    "tool_errors", "compactions", "active_ms", "kills", "interrupts"):
+            result[key] = int(result.get(key, 0)) + int(data.get(key, 0) or 0)
+        result["cache_savings"] = round(float(result.get("cache_savings", 0)) + float(data.get("cache_savings", 0) or 0), 4)
+        for pid, pdays in (data.get("project_daily") or {}).items():
+            key = pid if pid == "other" else f"{source_id}::{pid}"
+            bucket = result.setdefault("project_daily", {}).setdefault(key, {})
+            for day, value in pdays.items():
+                bucket[day] = round(bucket.get(day, 0.0) + float(value or 0), 4)
+        first = data.get("first_activity") or ""
+        if first and (not result["first_activity"] or first < result["first_activity"]):
+            result["first_activity"] = first
+        for day in data.get("daily") or []:
+            bucket = daily.setdefault(day["d"], {"d": day["d"], **_EMPTY_DAY, "models": {}})
+            for key in _EMPTY_DAY:
+                bucket[key] += day.get(key, 0) or 0
+            for model, model_cost in (day.get("models") or {}).items():
+                bucket["models"][model] = bucket["models"].get(model, 0.0) + float(model_cost or 0)
+        for project in data.get("by_project") or []:
+            by_project.append({**project, "provider": agent, "source_id": source_id,
+                               "id": f"{source_id}::{project.get('id', '')}"})
+        for table in tables:
+            for name, row in (data.get(table) or {}).items():
+                bucket = tables[table].setdefault(name, {"count": 0, "sessions": 0, "projects": 0, "last": 0.0, "providers": []})
+                bucket["count"] += int(row.get("count", 0) or 0)
+                bucket["sessions"] += int(row.get("sessions", 0) or 0)
+                bucket["projects"] += int(row.get("projects", 0) or 0)
+                bucket["last"] = max(bucket["last"], float(row.get("last", 0) or 0))
+                if agent not in bucket["providers"]:
+                    bucket["providers"].append(agent)
+    result["cost"] = round(result["cost"], 4)
+    result["tool_counts"] = dict(tools.most_common(24))
+    result["sessions_by_day"] = sorted(days.items())[-90:]
+    result["daily"] = [dict(daily[key], cost=round(daily[key]["cost"], 4)) for key in sorted(daily)][-90:]
+    by_project.sort(key=lambda item: item.get("last_activity", 0), reverse=True)
+    result["by_project"] = by_project
+    result.update(tables)
+    return result

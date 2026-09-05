@@ -41,6 +41,7 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 .mono { font-family: var(--mono); font-size: 11.5px; }
+code { font-family: var(--mono); font-size: 11px; background: var(--panel); padding: 1px 5px; border-radius: 3px; }
 .dim { color: var(--fg-dim); }
 .faint { color: var(--fg-faint); }
 .nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -98,11 +99,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 
 .seg {
-  display: inline-flex; align-self: flex-start; gap: 4px; padding: 3px;
+  display: inline-flex; align-self: flex-start; gap: 2px; padding: 3px;
   background: var(--panel); border-radius: 999px; border: 1px solid var(--line);
 }
-.seg .chip { border: none; background: none; }
-.seg .chip.on { background: var(--boost); border: none; }
+.seg .chip { border: none; background: none; padding: 3px 10px; }
+.seg .chip.on { background: var(--boost); border: none; color: var(--fg); }
 
 /* ---------- form controls ---------- */
 

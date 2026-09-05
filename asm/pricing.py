@@ -83,6 +83,12 @@ class Usage:
         return self.input + self.output + self.cache_read + self.cache_write
 
 
+def cache_savings(cache_read_tokens: int, model: str | None) -> float:
+    """USD saved by serving ``cache_read_tokens`` from cache instead of fresh input."""
+    p = price_for(model)
+    return cache_read_tokens * p.input * (1.0 - CACHE_READ_MULTIPLIER) / 1_000_000.0
+
+
 def cost_for(usage: Usage, model: str | None) -> float:
     """Return the estimated USD cost of a usage bundle for a given model."""
     p = price_for(model)

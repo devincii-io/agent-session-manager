@@ -90,6 +90,20 @@ class FrontendConventionTests(unittest.TestCase):
         for category in ("read", "search", "edit", "exec", "web", "agent", "plan", "ask", "mcp", "other"):
             self.assertIn(f"--cat-{category}:", light[0], f"--cat-{category} missing from the dark theme")
             self.assertIn(f"--cat-{category}:", light[1], f"--cat-{category} missing from the light theme")
+        for slot in range(1, 9):
+            self.assertIn(f"--series-{slot}:", light[0])
+            self.assertIn(f"--series-{slot}:", light[1])
+
+    def test_category_palette_keeps_its_validated_order(self) -> None:
+        """The eight chromatic category hues were validated as an *ordered* set
+        for colour-vision separation; reordering them silently breaks that."""
+        tokens = read("css", "tokens.css")
+        dark = tokens.split(':root[data-theme="light"]', 1)[0]
+        values = re.findall(r"--cat-(read|search|edit|exec|web|agent|plan|ask):\s*(#[0-9a-f]{6})", dark)
+        self.assertEqual([name for name, _ in values], ["read", "search", "edit", "exec", "web", "agent", "plan", "ask"])
+        series = re.findall(r"--series-(\d):\s*(#[0-9a-f]{6})", dark)
+        self.assertEqual([hex_ for _, hex_ in values], [hex_ for _, hex_ in series[:8]],
+                         "the category order must mirror the series order it was validated with")
 
     def test_bar_fill_accepts_a_calculated_width(self) -> None:
         rules = re.findall(r"\.bar-fill\s*\{([^}]+)\}", all_css())
@@ -137,16 +151,48 @@ class FrontendConventionTests(unittest.TestCase):
         self.assertIn('data-action="browse-more"', js)
         self.assertIn("cleanupLimit", js)
         self.assertIn('data-action="cleanup-more"', js)
+        self.assertIn("traceLimit", js)
+        self.assertIn('data-action="trace-more"', js)
         self.assertIn("MAX_BROWSER_TRANSCRIPT_EVENTS", js)
 
     def test_async_loads_are_guarded_against_stale_renders(self) -> None:
         js = all_js()
-        for key in ("session", "project", "search", "cleanup", "overview", "recent"):
+        for key in ("session", "project", "search", "cleanup", "overview", "stats", "recent", "trace"):
             self.assertIn(
                 f"ticket !== State.requestSeq.{key}",
                 js,
                 f"the {key} loader can paint a stale result",
             )
+
+    def test_reads_go_through_the_async_lane(self) -> None:
+        """Every backend read is answered on the `replied` signal, never by a
+        blocking slot call, so the GUI thread stays free during a scan."""
+        api = read("js", "core", "api.js")
+        self.assertIn("backend.invoke(id, method, JSON.stringify(args))", api)
+        self.assertIn("object.replied.connect(onReply)", api)
+        app = read("js", "app.js")
+        # Boot fires the independent loaders without awaiting them in sequence.
+        boot = app.split("async function boot()", 1)[1].split("function bootPreview", 1)[0]
+        self.assertNotIn("await loadOverview()", boot)
+        self.assertNotIn("await loadRecent(", boot)
+        self.assertIn("loadStats();", boot)
+
+    def test_live_refresh_updates_only_the_open_session_body(self) -> None:
+        app = read("js", "app.js")
+        self.assertIn('call("getSessionMeta"', app)
+        refresh = app.split("async function runSessionRefresh()", 1)[1].split("function onIndexProgress", 1)[0]
+        self.assertIn("renderTab()", refresh)
+        self.assertNotIn("renderMain()", refresh, "a live tick must not rebuild the whole pane")
+
+    def test_hover_readouts_use_the_shared_tooltip(self) -> None:
+        """Charts and lists carry data-tip; one delegated handler renders it
+        with textContent so untrusted labels never reach innerHTML."""
+        js = all_js()
+        self.assertIn('data-tip="', js)
+        app = read("js", "app.js")
+        self.assertIn("row.textContent = line", app)
+        for view in ("charts.js", "components.js"):
+            self.assertNotIn("<title>", read("js", "ui", view), f"{view} should use data-tip, not SVG <title>")
 
     def test_cleanup_keeps_a_filter_set_per_mode(self) -> None:
         self.assertIn("cleanupFilterSets", all_js())

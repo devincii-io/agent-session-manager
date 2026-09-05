@@ -21,26 +21,45 @@
 
 ---
 
-## The part I actually built this for
+## What it answers
 
-Set a goal with Claude Code's `/goal` and a Stop hook keeps the agent working
-until the condition holds. What you get afterwards is a `.jsonl` file. What you
-want is the story.
+Every Claude Code and Codex session leaves a `.jsonl` file behind. Nobody reads
+those. This app turns them into the four questions you actually have.
 
-Open a goal and you see the whole run: every follow-up you sent while it was
-active, every time the hook refused to let the agent stop and the reason it
-gave, the files it touched, the commands it ran, and the moment the condition
-was finally met.
+**How much did this cost, and how much of my time went into it?** The overview
+opens on spend and hours for the period you pick, each with its trend against
+the period before, a spend-per-day chart stacked by model or by project, a
+project table you can sort, and the weekday-by-hour grid of when you really
+work. Cache savings get their own number, because caching is where the money
+goes or does not.
+
+![Overview](docs/overview.png)
+
+**What happened in this session, and what did it mean?** A session opens on a
+summary: spend, active time versus wall clock, how full the context got, how
+reliably the tools ran. Under it, findings in plain sentences. Which kind of
+work ate the hours. Where the agent was idle for three hours. That the context
+was compacted twice and the first time it dropped from 893k to 64k tokens.
+That the same command ran eighteen times. That one file was read nine times.
+
+![Session summary](docs/summary.png)
+
+**Which skills and agents did I use, where, and what did I kill?** Skill
+invocations, subagents spawned, tasks and shells stopped, and the turns you
+interrupted are traced per session and rolled up across every project and both
+agents. The Activity view has the totals, the tables by skill and by agent
+type, and a filterable log that jumps into the session an event happened in.
+
+![Activity](docs/activity.png)
+
+**When did it happen?** The timeline is the session on a clock. Claude Code
+`/goal` runs sit on top as bands, one row per prompt below, idle gaps
+collapsed, every tool call a tick in the colour of the work it did. Open a
+goal and you see every follow-up you sent while it ran, every time the Stop
+hook refused to let the agent finish and why, the files, the commands, and the
+moment the condition held.
 
 ![A goal, opened](docs/journey-goal.png)
-
-Zoom out and the session becomes a clock. Goal bands on top, one row per prompt
-below, idle gaps collapsed so a four-hour run fits on screen. Ten kinds of work
-(read, search, edit, shell, web, subagent, plan, question, mcp, other) each
-carry one colour, timed from the call to its result. The legend reads
-`shell 489 · 1h 22m`, not a bare count.
-
-![The Journey view](docs/journey.png)
 
 ---
 
@@ -48,14 +67,15 @@ carry one colour, timed from the call to its result. The legend reads
 
 <table>
 <tr>
-<td width="50%"><img src="docs/overview.png" alt="Overview"></td>
-<td width="50%"><img src="docs/analytics.png" alt="Analytics"></td>
+<td width="50%"><img src="docs/journey.png" alt="Timeline"></td>
+<td width="50%"><img src="docs/trace.png" alt="Trace"></td>
 </tr>
 <tr>
-<td><b>Overview.</b> Spend, tokens, 90 days of activity, and the hours you
-actually work.</td>
-<td><b>Analytics.</b> Token composition, context pressure, compactions, cache
-economics, the tools that failed, the files you kept coming back to.</td>
+<td><b>Timeline.</b> Goal bands, one row per prompt, ten kinds of work in ten
+colours, timed from each call to its result. Click a row for everything the
+agent did until your next prompt.</td>
+<td><b>Trace.</b> The same session's skills, agents, kills, interruptions,
+commands and compactions in order, with how long each agent ran.</td>
 </tr>
 <tr>
 <td><img src="docs/transcript.png" alt="Transcript"></td>
@@ -64,8 +84,8 @@ economics, the tools that failed, the files you kept coming back to.</td>
 <tr>
 <td><b>Transcript.</b> User, assistant, thinking, tool calls and results, paged
 so a 100 MB session opens on a tail window and loads earlier pages on demand.</td>
-<td><b>Monitor.</b> What is running right now, plus the runtime state on disk:
-shell snapshots, session env dirs, scratchpads, task boards.</td>
+<td><b>Monitor.</b> What is writing right now, plus the runtime state on disk:
+shell snapshots, session env dirs, the live statusline capture.</td>
 </tr>
 <tr>
 <td><img src="docs/cleanup.png" alt="Cleanup"></td>
@@ -85,9 +105,10 @@ to get the same preview, which is exactly how these were captured.)*
 ### Browsing
 
 **Session browser.** *Recent* lists every session on the machine grouped Today /
-Yesterday / This week. *Projects* expands a project in place. Arrow keys walk it,
-`Enter` opens, `[` and `]` step between neighbours, and sessions you open stay as
-tabs.
+Yesterday / This week. *Projects* expands a project in place into a table of its
+sessions with active time, errors, context and spend. Arrow keys walk the
+browser, `Enter` opens, `[` and `]` step between neighbours, and sessions you
+open stay as tabs.
 
 **Agent switcher.** `All | Claude | Codex` filters which sessions you see. It is
 not a claim that a conversation can be converted between agents, because it
@@ -95,19 +116,18 @@ cannot.
 
 **Environment switcher.** Windows and each WSL distribution are independent
 sources. Enable only the distros you want in Settings. `All enabled` aggregates
-Claude and Codex metrics without slowing the default Windows-only refresh.
+Claude and Codex metrics, and each source is scanned in its own request, so a
+slow WSL walk never delays the Windows figures.
 
 **Global search.** Press Enter in the search box to search every session title
 and first prompt plus your full prompt history, with jump-to-session.
 
 ### Reading a session
 
-Past the transcript and the journey there are context meters (the
-statusline-style 10-slot meter, reconstructed per session from
-`input + cache_read + cache_write` over the context window), subagent sidechains
-and `Agent` / `Task` invocations, the per-session scratchpad tree, the task
-board, background-task output, and a thumbnail gallery of Claude uploads and
-legacy image-cache files.
+Past the summary, the timeline and the trace there is the transcript, subagent
+sidechains and `Agent` / `Task` invocations, the task board, the per-session
+scratchpad tree, a thumbnail gallery of Claude uploads, and a details tab with
+the token breakdown and the resume command.
 
 Cost is labelled honestly. Claude gets an explicit API-price estimate. Codex
 ChatGPT-plan usage is never dressed up as dollars.
@@ -147,20 +167,31 @@ confirm first.
 
 Transcripts get big. The whole design falls out of that.
 
+- Nothing blocks the interface. Every read runs on a worker thread and answers
+  over a signal; the window, the file watcher and the live ticks keep going
+  while a cold index or a WSL walk is under way.
+- Boot fires every request at once and paints each region as it lands. On a
+  warm cache the project list, the dashboard figures and the recent list are
+  all on screen about 400 ms after the page has loaded.
 - Streaming `orjson` parsing. A cold 10 MB Claude transcript summarizes in
-  about 40 ms.
-- Summaries cached on disk, keyed by mtime and size.
+  about 40 ms. A cold index of 60 sessions and 300 MB takes under a second,
+  and the status bar counts it down.
+- Summaries cached on disk, keyed by mtime and size, for Codex rollouts as
+  well as Claude transcripts. The cache is written at most every two seconds
+  while sessions are live, not after every scan.
 - Incremental parsing. While a session is live only the newly appended bytes
-  are read, roughly 0.1 ms per refresh, never the whole file again.
+  are read, roughly 0.1 ms per refresh, never the whole file again. A live tick
+  re-renders the open session's body, not the whole pane, so your scroll and
+  selection survive.
+- One walk of `projects/` serves the overview, the recent list and the global
+  stats fired together, instead of stat-ing every file three times.
 - Paged transcripts. The backend serves a small window and loads earlier pages
   on demand, so a 100 MB session opens straight onto its tail.
-- Path-aware filesystem events refresh the affected view instead of rebuilding
-  global analytics.
-- Codex rollouts are grouped by canonical working directory, parsed lazily, and
-  read cumulative token snapshots correctly. Subagent rollouts do not inflate
-  the session count.
-- WSL distro names are discovered cheaply and stay off by default. A distro is
-  resolved and scanned only once you enable and select it.
+- The watcher covers transcripts, task boards, settings and the statusline
+  capture, not the whole Claude home, so plugin and cache churn never triggers
+  a refresh.
+- WSL distro names are discovered cheaply, off the boot path, and stay off by
+  default. A distro is resolved and scanned only once you enable and select it.
 
 ## Keyboard
 
@@ -169,7 +200,8 @@ Transcripts get big. The whole design falls out of that.
 `Ctrl+K` opens every command. `Ctrl+P` quick-opens a session. `↑` and `↓` walk
 the browser, `[` and `]` step between neighbouring sessions. `Ctrl+F` filters,
 `Ctrl+Shift+F` searches all prompt history. `Ctrl+N` starts the selected agent
-in the current project, `Ctrl+Enter` resumes the selected session. `Ctrl+B`
+in the current project, `Ctrl+Enter` resumes the selected session. `Ctrl+1…5`
+jump to Overview, Activity, Monitor, Cleanup and Instructions. `Ctrl+B`
 collapses the browser, `Ctrl+Shift+L` switches theme. Press `?` in the app for
 the full reference.
 
@@ -179,7 +211,9 @@ the full reference.
 
 Every colour in the app resolves to a token in `web/css/tokens.css`. A hex
 literal anywhere else is a bug, because it would be wrong in one of the two
-themes, and a test enforces it.
+themes, and a test enforces it. The eight chart hues were validated as an
+ordered set for colour-vision-deficiency separation against each theme's
+surface, and a test keeps the order.
 
 ---
 
@@ -236,9 +270,9 @@ one-file executable, which avoids paying multi-second Qt WebEngine extraction on
 every launch. Build the per-user installer with Inno Setup 6:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.1.0 packaging\agent-session-manager.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.2.0 packaging\agent-session-manager.iss
 Copy-Item README.md,LICENSE -Destination dist\AgentSessionManager
-Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.1.0-Windows-x64-portable.zip -Force
+Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.2.0-Windows-x64-portable.zip -Force
 ```
 
 On Linux the same spec produces one portable `dist/AgentSessionManager`. The
@@ -248,7 +282,7 @@ PyInstaller cannot cross-compile, so run it on the target OS. From WSL or Linux
 the guarded release helper builds in an isolated temporary environment:
 
 ```bash
-bash packaging/build-linux.sh 3.1.0
+bash packaging/build-linux.sh 3.2.0
 ```
 
 Before publishing, write `dist/SHA256SUMS.txt` with an entry for every artifact.
@@ -265,25 +299,29 @@ PySide6, watchdog, orjson. The frontend is vanilla JS with no build step.
 asm/
   paths.py                 cross-platform Claude and Codex path resolution
   sources.py               lazy native/WSL source discovery and path context
-  session_parser.py        streaming .jsonl parser (summary + detail)
-  codex_session_parser.py  tolerant Codex rollout adapter
-  codex_scanner.py         Codex project/session index and locator map
+  session_parser.py        streaming .jsonl parser: summary, detail, per-day
+                           ledger, active clock, trace of skills/agents/kills
+  codex_session_parser.py  tolerant Codex rollout adapter with the same shape
+  codex_scanner.py         Codex project/session index, disk cache, locator map
   goals.py                 /goal runs, per-prompt segmentation, tool timing
-  scanner.py               enumerate projects, sessions, memory, tasks, settings
-  pricing.py               model price table and cost math
-  watcher.py               watchdog to Qt signals (live updates)
+  scanner.py               enumerate projects, sessions, memory, tasks, settings;
+                           one memoised walk serves every aggregate
+  pricing.py               model price table, cost math, cache savings
+  watcher.py               watchdog to Qt signals, narrow watches (live updates)
   actions.py               delete, bulk-delete, save, settings, statusline hook
   assistant.py             headless `claude` CLI prompts and output parsing
   update.py                release-feed check and checksum-verified install
-  bridge.py                the QWebChannel object exposed to JS
+  bridge.py                the QWebChannel object: an async request lane on
+                           worker threads, replies and progress over signals
   app.py                   QApplication and the QWebEngineView shell
 web/
   index.html               the shell, loads everything below
   css/                     tokens (both themes), base, shell, components,
                            charts, journey, views
-  js/core/                 state, the QWebChannel client, formatting, theming
-  js/ui/                   charts, markup primitives, toasts, dialogs
-  js/views/                one file per view; journey.js owns the canvas ribbon
+  js/core/                 state, the async channel client, formatting, theming
+  js/ui/                   charts (with the shared hover readout), primitives
+  js/views/                one file per view: overview, summary, activity,
+                           journey (the timeline canvas), session, sidebar, …
   js/preview.js            fixtures that make web/index.html work in a browser
 ```
 

@@ -7,6 +7,14 @@
    the document element. Nothing below this file may hard-code a
    colour — a literal hex in a component is a bug, because it will
    be wrong in one of the two themes.
+
+   The categorical colours (work categories, chart series) are a
+   validated set: each theme's eight hues were checked for
+   colour-vision-deficiency separation and contrast against that
+   theme's surface, and the *order* is part of the guarantee — a
+   stacked bar lays them out in this sequence, so neighbours were
+   chosen to stay apart. Do not reorder or eyeball a replacement;
+   re-run the validator.
    ============================================================ */
 
 :root {
@@ -20,15 +28,17 @@
 
   /* --- ink --- */
   --fg: #e6e9ef;
-  --fg-dim: color-mix(in srgb, var(--fg) 62%, transparent);
-  --fg-faint: color-mix(in srgb, var(--fg) 38%, transparent);
-  --line: color-mix(in srgb, var(--fg) 11%, transparent);
+  --fg-dim: color-mix(in srgb, var(--fg) 64%, transparent);
+  --fg-faint: color-mix(in srgb, var(--fg) 42%, transparent);
+  --line: color-mix(in srgb, var(--fg) 10%, transparent);
   --line-strong: color-mix(in srgb, var(--fg) 20%, transparent);
+  --grid: color-mix(in srgb, var(--fg) 8%, transparent);
+  --axis: color-mix(in srgb, var(--fg) 18%, transparent);
 
   /* --- meaning --- */
   --primary: #e08a4b;   /* the app's own colour: actions, the live edge */
   --accent: #6ea8fe;    /* selection, links, "this one" */
-  --success: #8ac97a;
+  --success: #6fc36f;
   --warning: #e0b64c;
   --error: #e0736b;
 
@@ -36,39 +46,50 @@
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   --error-soft: color-mix(in srgb, var(--error) 15%, transparent);
   --success-soft: color-mix(in srgb, var(--success) 15%, transparent);
+  --warning-soft: color-mix(in srgb, var(--warning) 15%, transparent);
 
   /* --- work categories ---------------------------------------
-     One colour per kind of thing an agent does. These are the most
-     load-bearing colours in the app: they key the journey lanes,
-     the per-goal bars and every tool legend, so the same hue always
-     means the same kind of work no matter which chart you are in. */
-  --cat-read: #6ea8fe;
-  --cat-search: #56c2b0;
-  --cat-edit: #8ac97a;
-  --cat-exec: #e0b64c;
-  --cat-web: #b98cc9;
-  --cat-agent: #e0894f;
-  --cat-plan: #93a2b5;
-  --cat-ask: #ea7a9b;
-  --cat-mcp: #6fd3e8;
-  --cat-other: #78828f;
+     One colour per kind of thing an agent does, in stack order:
+     read, search, edit, shell, web, subagent, plan, question. The
+     two tail categories (mcp, other) are neutral on purpose — they
+     are the fold, not a series. Same hue always means the same kind
+     of work no matter which chart you are in. */
+  --cat-read: #3987e5;
+  --cat-search: #d95926;
+  --cat-edit: #199e70;
+  --cat-exec: #c98500;
+  --cat-web: #d55181;
+  --cat-agent: #008300;
+  --cat-plan: #9085e9;
+  --cat-ask: #e66767;
+  --cat-mcp: #7d8a9b;
+  --cat-other: #596371;
 
-  /* --- outcomes: how a goal ended --- */
+  /* --- outcomes: how a prompt ended --- */
   --out-done: var(--success);
   --out-recovered: var(--warning);
   --out-error: var(--error);
   --out-question: var(--cat-ask);
   --out-empty: var(--fg-faint);
 
+  /* --- trace kinds: what was invoked, delegated, killed, interrupted --- */
+  --trace-skill: var(--cat-plan);
+  --trace-agent: var(--cat-agent);
+  --trace-kill: var(--error);
+  --trace-interrupt: var(--warning);
+  --trace-command: var(--fg-faint);
+  --trace-compaction: var(--cat-read);
+
   /* --- chart series, in the order a chart consumes them --- */
-  --series-1: #6ea8fe;
-  --series-2: #e0894f;
-  --series-3: #8ac97a;
-  --series-4: #b98cc9;
-  --series-5: #e0b64c;
-  --series-6: #56c2b0;
-  --series-7: #ea7a9b;
-  --series-8: #93a2b5;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #596371;
 
   /* --- form --- */
   --radius: 10px;
@@ -92,10 +113,10 @@
    A percentage of ink on paper is not the mirror of a percentage of
    paper on ink, so none of the dark alphas are simply reused. Each
    value below was re-aimed against --surface (the lightest ground
-   anything sits on, therefore the worst case) to clear 4.5:1 for
-   text and 3:1 for a boundary that carries meaning. The category
-   hues keep their hue and give up lightness — hue is what encodes
-   the meaning, so that is the part that must survive.
+   anything sits on, therefore the worst case). The category hues are
+   the same eight families stepped for a white surface; three of them
+   (edit, shell, web) sit under 3:1 on white by design and every
+   place they appear carries a text label beside the mark.
    ------------------------------------------------------------ */
 :root[data-theme="light"] {
   color-scheme: light;
@@ -106,36 +127,39 @@
   --boost: #e2e6ec;
 
   --fg: #171a20;
-  --fg-dim: color-mix(in srgb, var(--fg) 66%, transparent);
-  --fg-faint: color-mix(in srgb, var(--fg) 48%, transparent);
-  --line: color-mix(in srgb, var(--fg) 14%, transparent);
+  --fg-dim: color-mix(in srgb, var(--fg) 68%, transparent);
+  --fg-faint: color-mix(in srgb, var(--fg) 50%, transparent);
+  --line: color-mix(in srgb, var(--fg) 13%, transparent);
   --line-strong: color-mix(in srgb, var(--fg) 26%, transparent);
+  --grid: color-mix(in srgb, var(--fg) 9%, transparent);
+  --axis: color-mix(in srgb, var(--fg) 22%, transparent);
 
   --primary: #b15f1d;
   --accent: #2d6ed4;
-  --success: #3f7f37;
+  --success: #2f7d2f;
   --warning: #96700c;
   --error: #c03d3d;
 
-  --cat-read: #2d6ed4;
-  --cat-search: #16786a;
-  --cat-edit: #3f7f37;
-  --cat-exec: #8a6608;
-  --cat-web: #7a4c9c;
-  --cat-agent: #a85c1c;
-  --cat-plan: #4d5b6d;
-  --cat-ask: #b03f68;
-  --cat-mcp: #17708a;
-  --cat-other: #59626e;
+  --cat-read: #2a78d6;
+  --cat-search: #eb6834;
+  --cat-edit: #1baf7a;
+  --cat-exec: #eda100;
+  --cat-web: #e87ba4;
+  --cat-agent: #008300;
+  --cat-plan: #4a3aa7;
+  --cat-ask: #e34948;
+  --cat-mcp: #6b7785;
+  --cat-other: #8a94a1;
 
-  --series-1: #2d6ed4;
-  --series-2: #a85c1c;
-  --series-3: #3f7f37;
-  --series-4: #7a4c9c;
-  --series-5: #8a6608;
-  --series-6: #16786a;
-  --series-7: #b03f68;
-  --series-8: #4d5b6d;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --series-other: #8a94a1;
 
   --shadow-1:
     0 2px 5px color-mix(in srgb, var(--fg) 8%, transparent),

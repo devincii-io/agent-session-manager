@@ -148,6 +148,10 @@
 .sb-row .sb-sub b { color: var(--fg-dim); font-weight: 600; }
 .sb-row .sb-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: 46%; }
 .sb-row .sb-when { font-size: 10.5px; color: var(--fg-faint); white-space: nowrap; }
+.sb-row .sb-marks { display: flex; align-items: center; gap: 5px; min-height: 9px; }
+.sb-row .mark-err { width: 6px; height: 6px; border-radius: 2px; background: var(--error); display: inline-block; }
+.sb-row .mark-agent { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--cat-agent); display: inline-block; box-sizing: border-box; }
+.sb-row.project .sb-title { font-weight: 500; }
 
 .sb-caret {
   flex: none; width: 14px; text-align: center; color: var(--fg-faint);

@@ -21,10 +21,10 @@ Python ≥ 3.10. The GUI needs a display; on WSL, WSLg works out of the box
 |---|---|
 | `asm/paths.py` | Where Claude Code keeps things, cross-platform |
 | `asm/pricing.py` | Model price table + cost math |
-| `asm/session_parser.py` | Incremental `.jsonl` builders (summary, detail, analytics) |
+| `asm/session_parser.py` | Incremental `.jsonl` builders (summary, detail, per-day ledger, trace) |
 | `asm/goals.py` | Goal segmentation and tool categorisation, shared by both parsers |
-| `asm/scanner.py` | Enumeration + caching + paged transcript state |
-| `asm/watcher.py` / `asm/bridge.py` | Live updates and the QWebChannel API |
+| `asm/scanner.py` / `asm/codex_scanner.py` | Enumeration, disk caches, one memoised walk per aggregate, paged transcript state |
+| `asm/watcher.py` / `asm/bridge.py` | Live updates and the QWebChannel API; reads run on worker threads and answer over `replied` |
 | `asm/actions.py` | Anything that writes (deletes, settings, statusline hook) |
 | `web/css/` | Design tokens then layers; **every** colour lives in `tokens.css` |
 | `web/js/core/` | State, the QWebChannel client, formatting, theming |

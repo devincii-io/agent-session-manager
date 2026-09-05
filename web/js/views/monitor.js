@@ -16,10 +16,6 @@
 
   function render() {
     if (State.agent === "codex") return codexView();
-    if (State.agent === "all") {
-      return ui.emptyState("M", "Choose an agent",
-        "Runtime monitoring has agent-specific capabilities. Select Claude or Codex in the top bar.");
-    }
 
     const active = State.projects.filter((project) => project.active_count);
     const live = State.settings && State.settings.live;
@@ -31,7 +27,8 @@
 
     return `
       <div class="page-head"><div class="ph-title"><h1>Monitor</h1>
-        <div class="ph-sub">What Claude Code is doing right now. Totals and spend live on Overview.</div></div>
+        <div class="ph-sub">What is running right now. Activity is inferred from file writes: a transcript changed in the last two minutes.${
+          State.agent === "all" ? " Shell snapshots and the live statusline are Claude-only; pick Claude in the top bar to see them." : ""}</div></div>
         <div class="page-actions"><button class="btn sm" data-action="refresh">Refresh</button></div></div>
 
       ${live ? ui.section("Live statusline", `<div class="card">${ASM.views.settings ? "" : ""}
@@ -42,8 +39,8 @@
         ${liveSessions.length ? liveSessions.map((session) => `
           <div class="row-item" data-action="open-session" data-pid="${esc(session.project_id)}" data-sid="${esc(session.session_id)}">
             <div class="ri-ic"><span class="dot-active"></span></div>
-            <div class="ri-main"><div class="ri-name">${esc(session.title || session.session_id)}</div>
-              <div class="ri-desc">${esc(session.project_name || "")} · ${session.assistant_messages} turns · ${session.tool_calls} tools</div></div>
+            <div class="ri-main"><div class="ri-name">${esc(session.title || session.session_id)} ${ui.providerBadge(session.provider)}</div>
+              <div class="ri-desc">${esc(session.project_name || "")} · ${fmt.hours(session.active_ms)} active · ${session.assistant_messages} turns${session.tool_errors ? ` · ${session.tool_errors} failed calls` : ""}</div></div>
             <div class="ri-meta">${esc(fmt.rel(session.mtime))}${session.context_pct ? `<br>${fmt.pct(session.context_pct)} ctx` : ""}</div>
           </div>`).join("")
           : `<div class="sb-empty">No session transcript has been written to in the last two minutes.</div>`}
@@ -60,7 +57,7 @@
           : `<div class="sb-empty">No projects active in the last two minutes.</div>`}
       </div></div>`)}
 
-      ${ui.section(`Shell snapshots (${snapshots.length})`, `<div class="card flush"><div class="rows">
+      ${State.agent !== "claude" ? "" : ui.section(`Shell snapshots (${snapshots.length})`, `<div class="card flush"><div class="rows">
         ${snapshots.length ? snapshots.map((file) => `
           <div class="row-item" data-action="cfg-view" data-path="${esc(file.path)}">
             <div class="ri-ic">sh</div>
@@ -70,7 +67,7 @@
           : `<div class="sb-empty">No shell snapshots.</div>`}
       </div></div>`, { desc: "When a session starts, Claude Code snapshots your shell profile and sources it for every Bash call. These are those scripts." })}
 
-      ${ui.section(`Session environments (${environments.length})`, `<div class="card flush"><div class="rows">
+      ${State.agent !== "claude" ? "" : ui.section(`Session environments (${environments.length})`, `<div class="card flush"><div class="rows">
         ${environments.length ? environments.map((entry) => `
           <div class="row-item" data-action="open-folder" data-path="${esc(entry.path)}">
             <div class="ri-ic">env</div>

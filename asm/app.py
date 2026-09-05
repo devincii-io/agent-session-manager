@@ -181,6 +181,8 @@ def main() -> int:
     app.setPalette(palette)
 
     window = MainWindow()
+    # Flush the summary caches and release the workers before Qt tears down.
+    app.aboutToQuit.connect(window._bridge.shutdown)
     window.show()
     return app.exec()
 

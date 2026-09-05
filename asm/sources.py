@@ -76,11 +76,21 @@ def _unc_home(distro: str, linux_home: str) -> str:
     return str(Path(f"\\\\wsl.localhost\\{distro}").joinpath(*parts))
 
 
-@lru_cache(maxsize=1)
-def discover_sources() -> tuple[Source, ...]:
+def local_source() -> Source:
+    """The native source, without spawning ``wsl.exe``.
+
+    The bridge needs this at construction time, before the window is even
+    shown; listing WSL distributions costs a process spawn and belongs on a
+    worker thread once the UI is up.
+    """
     local_id = "windows" if platform.system() == "Windows" else "local"
     local_label = "Windows" if local_id == "windows" else platform.system() or "Local"
-    result = [Source(local_id, local_label, "local", str(Path.home()))]
+    return Source(local_id, local_label, "local", str(Path.home()))
+
+
+@lru_cache(maxsize=1)
+def discover_sources() -> tuple[Source, ...]:
+    result = [local_source()]
     if platform.system() != "Windows":
         return tuple(result)
     listed = _run(["wsl.exe", "-l", "-q"])

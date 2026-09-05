@@ -484,7 +484,8 @@
         <div class="section-title"><span>Every tool call, in order (${steps.length})</span></div>
         <div class="jn-steps">${steps.map((step) =>
           `<span class="jn-step bg-${esc(step.c)} ${step.e ? "err" : ""}"
-            title="${esc(step.n)}${step.e ? " — returned an error" : ""} · ${esc(fmt.clock(step.t))}${
+            data-tip="${esc(step.n)}${step.e ? " (returned an error)" : ""}
+${esc(fmt.clock(step.t))}${
               step.ms ? ` · ${esc(fmt.duration(step.ms))}` : ""}"></span>`).join("")}</div>
       </div>` : ""}
 
@@ -510,7 +511,7 @@
       ${(goal.files || []).length ? `<div class="jg-block">
         <div class="section-title"><span>Files touched (${goal.files.length})</span></div>
         <div class="jn-chips">${goal.files.map((file) =>
-          `<span class="jn-chip" title="${esc(file)}">${esc(fmt.shortPath(file))}</span>`).join("")}</div>
+          `<span class="jn-chip" data-tip="${esc(file)}">${esc(fmt.shortPath(file))}</span>`).join("")}</div>
       </div>` : ""}
 
       ${commands.length ? `<div class="jg-block">
@@ -545,7 +546,7 @@
       <span class="jg-num">${item.i + 1}</span>
       <span class="jg-outcome" aria-hidden="true"></span>
       <span class="jg-main">
-        <span class="jg-prompt-text" title="${esc(prompt)}">${esc(prompt)}</span>
+        <span class="jg-prompt-text">${esc(prompt)}</span>
         ${ui.stackBar(item.by_cat)}
         <span class="jg-meta">${meta.join(" · ")}</span>
       </span>
@@ -574,12 +575,13 @@
 
     const steps = (item.steps || []).map((step) =>
       `<span class="jn-step bg-${esc(step.c)} ${step.e ? "err" : ""}"
-        title="${esc(step.n)}${step.e ? " — returned an error" : ""} · ${esc(fmt.clock(step.t))}${
+        data-tip="${esc(step.n)}${step.e ? " (returned an error)" : ""}
+${esc(fmt.clock(step.t))}${
           step.ms ? ` · ${esc(fmt.duration(step.ms))}` : ""}"></span>`).join("");
     const errorChips = Object.entries(item.error_names || {}).map(([name, count]) =>
       `<span class="jn-chip err">${esc(name)} ×${count}</span>`).join("");
     const fileChips = (item.files || []).map((file) =>
-      `<span class="jn-chip" title="${esc(file)}">${esc(fmt.shortPath(file))}</span>`).join("");
+      `<span class="jn-chip" data-tip="${esc(file)}">${esc(fmt.shortPath(file))}</span>`).join("");
     const commandChips = (item.commands || []).map((command) =>
       `<span class="jn-chip">${esc(command)}</span>`).join("");
 
@@ -641,7 +643,7 @@
 
       <div class="jn-ribbon">
         <div class="jn-ribbon-head">
-          <span class="jrh-title">The session on a clock</span>
+          <span class="jrh-title">On a clock</span>
           <span>${esc(fmt.time(list[0] ? list[0].start : (runs[0] && runs[0].start)))}</span>
           <span class="jrh-hint">${runs.length ? "Goal bands on top, one row per prompt · " : "One row per prompt · "}idle gaps collapsed</span>
         </div>
@@ -690,10 +692,8 @@
   }
 
   function noGoalsNotice() {
-    return ui.notice(`<strong>No goal was set in this session.</strong> Claude Code's
-      <span class="mono">/goal</span> command arms a Stop hook that keeps the agent working until a
-      condition holds; when one is used, this view shows when it started, when it was met, and
-      everything that happened in between. Below is this session's prompt timeline.`);
+    return `<div class="section-note">No <span class="mono">/goal</span> was set in this session, so there is no goal band.
+      Each row below is one prompt you sent and everything the agent did until the next one.</div>`;
   }
 
   /* ---------------------------------------------------------------- */

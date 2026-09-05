@@ -1,7 +1,8 @@
 /* ============================================================
-   Per-view layout: transcript, cleanup, settings, instructions,
-   monitor, memory and the image gallery. Everything here is built
-   out of components.css and only adds what one view genuinely needs.
+   Per-view layout: overview, transcript, cleanup, settings,
+   instructions, monitor, memory and the image gallery. Everything
+   here is built out of components.css and only adds what one view
+   genuinely needs.
    ============================================================ */
 
 /* ---------- overview ---------- */
@@ -20,37 +21,17 @@
 .quick-action.primary strong { color: var(--primary); }
 
 .split-2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
+.split-2.wide-left { grid-template-columns: minmax(0, 3fr) minmax(300px, 2fr); }
 
 /* ---------- session header ---------- */
 
-.session-head { display: flex; flex-direction: column; gap: 12px; }
+.session-head { display: flex; flex-direction: column; gap: 10px; }
 .session-head .sh-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .session-head h1 { overflow-wrap: anywhere; }
-.session-head .sh-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: var(--fg-faint); }
+.session-head .sh-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: var(--fg-faint); align-items: center; }
 .session-head .sh-facts b { color: var(--fg-dim); font-weight: 600; }
-
-/* ---------- health panel ---------- */
-
-.health {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 12px 14px; border-radius: var(--radius);
-  background: var(--surface); border: 1px solid var(--line);
-  border-left: 3px solid var(--success);
-}
-.health.watch { border-left-color: var(--warning); }
-.health.attention { border-left-color: var(--error); }
-.health .hp-state {
-  font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
-  padding: 3px 9px; border-radius: 999px; background: var(--success-soft); color: var(--success); flex: none;
-}
-.health.watch .hp-state { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
-.health.attention .hp-state { background: var(--error-soft); color: var(--error); }
-.health .hp-copy { flex: 1 1 260px; min-width: 0; }
-.health .hp-copy strong { font-size: 12.5px; }
-.health .hp-copy p { font-size: 12px; color: var(--fg-dim); margin-top: 2px; }
-.health .hp-metrics { display: flex; gap: 14px; font-size: 11px; color: var(--fg-faint); font-family: var(--mono); }
-.health .hp-metrics b { color: var(--fg); }
-.health .hp-actions { display: flex; gap: 6px; }
+.session-head .fact-link { color: var(--fg-dim); cursor: pointer; }
+.session-head .fact-link:hover { color: var(--accent); text-decoration: underline; }
 
 /* ---------- transcript ---------- */
 
@@ -63,7 +44,7 @@
 }
 .msg.user .msg-avatar { background: color-mix(in srgb, var(--cat-read) 22%, transparent); color: var(--cat-read); }
 .msg.assistant .msg-avatar { background: var(--primary-soft); color: var(--primary); }
-.msg.sidechain .msg-avatar { background: color-mix(in srgb, var(--cat-web) 22%, transparent); color: var(--cat-web); }
+.msg.sidechain .msg-avatar { background: color-mix(in srgb, var(--cat-plan) 22%, transparent); color: var(--cat-plan); }
 .msg-body { flex: 1; min-width: 0; }
 .msg-head { display: flex; gap: 7px; align-items: center; font-size: 10.5px; color: var(--fg-faint); margin-bottom: 4px; }
 .msg-role { font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
@@ -244,9 +225,14 @@
 
 /* ---------- narrow ---------- */
 
+@container main (max-width: 760px) {
+  .split-2.wide-left { grid-template-columns: 1fr; }
+}
+
 @container main (max-width: 620px) {
   .config-layout { grid-template-columns: 1fr; }
   .setting-row { flex-direction: column; align-items: flex-start; gap: 8px; }
   .setting-row .s-ctl { align-self: flex-start; }
-  .health { flex-direction: column; align-items: flex-start; }
+  .trace-row { grid-template-columns: 52px auto minmax(0, 1fr) auto; }
+  .trace-row .tr-detail, .trace-row .tr-where { display: none; }
 }

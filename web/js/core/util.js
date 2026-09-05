@@ -35,6 +35,8 @@
   const currencyRound = new Intl.NumberFormat(undefined, {
     style: "currency", currency: "USD", maximumFractionDigits: 0,
   });
+  const dayMonth = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  const weekday = new Intl.DateTimeFormat(undefined, { weekday: "short" });
 
   const fmt = {
     cost(value) {
@@ -46,11 +48,17 @@
     tokens(value) {
       const n = Number(value) || 0;
       if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
-      if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+      if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
       return String(n);
     },
     num(value) { return (Number(value) || 0).toLocaleString(); },
+    /** 1,284 · 12.9k · 4.2M — the compact figure a stat tile wants. */
+    compact(value) {
+      const n = Number(value) || 0;
+      if (Math.abs(n) < 10000) return n.toLocaleString();
+      return fmt.tokens(n);
+    },
     bytes(value) {
       const n = Number(value) || 0;
       if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
@@ -71,6 +79,30 @@
       const hours = Math.floor(minutes / 60);
       if (hours < 48) return hours + "h " + String(minutes % 60).padStart(2, "0") + "m";
       return Math.floor(hours / 24) + "d " + (hours % 24) + "h";
+    },
+
+    /** Hours of work, coarse: 0m, 45m, 3h 20m, 18h, 61h. */
+    hours(ms) {
+      const minutes = Math.round((Number(ms) || 0) / 60000);
+      if (minutes < 1) return "0m";
+      if (minutes < 60) return minutes + "m";
+      const hours = Math.floor(minutes / 60);
+      const rest = minutes % 60;
+      if (hours >= 10 || !rest) return hours + "h";
+      return hours + "h " + String(rest).padStart(2, "0") + "m";
+    },
+
+    /** A signed percentage change, or "new" when there is no baseline. */
+    delta(current, previous) {
+      const now = Number(current) || 0;
+      const then = Number(previous) || 0;
+      if (!then) return now ? "new" : "";
+      // A baseline under a twentieth of today's figure turns any change into
+      // a four-digit percentage that reads as noise; say nothing instead.
+      if (then < now * 0.05) return "";
+      const change = (100 * (now - then)) / then;
+      if (Math.abs(change) < 0.5) return "±0%";
+      return (change > 0 ? "+" : "−") + Math.abs(change).toFixed(Math.abs(change) < 10 ? 1 : 0) + "%";
     },
 
     /** Epoch seconds or an ISO string → milliseconds, or NaN. */
@@ -103,6 +135,33 @@
       return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     },
 
+    /** "Aug 20" — for axes and rows where the year is obvious. */
+    day(value) {
+      const t = fmt.ms(value);
+      if (isNaN(t)) return "";
+      return dayMonth.format(new Date(t));
+    },
+
+    /** "Aug 20 · 09:12" */
+    dayClock(value) {
+      const t = fmt.ms(value);
+      if (isNaN(t)) return "";
+      return `${dayMonth.format(new Date(t))} · ${fmt.clock(t)}`;
+    },
+
+    weekday(value) {
+      const t = fmt.ms(value);
+      return isNaN(t) ? "" : weekday.format(new Date(t));
+    },
+
+    /** A YYYY-MM-DD key in local time. */
+    isoDay(value) {
+      const t = fmt.ms(value);
+      if (isNaN(t)) return "";
+      const d = new Date(t);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    },
+
     /** The day bucket a timestamp belongs to, as a person would name it. */
     dayBucket(value) {
       const t = fmt.ms(value);
@@ -127,6 +186,11 @@
     shortPath(path) {
       const parts = String(path || "").split(/[\\/]/).filter(Boolean);
       return parts.slice(-2).join("/") || String(path || "");
+    },
+
+    plural(count, noun, plural) {
+      const n = Number(count) || 0;
+      return `${n.toLocaleString()} ${n === 1 ? noun : (plural || noun + "s")}`;
     },
   };
 
@@ -203,7 +267,26 @@
     };
   }
 
+  /** At most one call per `wait` ms, trailing edge kept. */
+  function throttle(fn, wait) {
+    let last = 0;
+    let timer = 0;
+    return function scheduled(...args) {
+      const now = Date.now();
+      const remaining = wait - (now - last);
+      clearTimeout(timer);
+      if (remaining <= 0) { last = now; fn(...args); return; }
+      timer = setTimeout(() => { last = Date.now(); fn(...args); }, remaining);
+    };
+  }
+
   function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
 
-  ASM.util = { esc, attr, fmt, dom, raf, debounce, clamp };
+  function sum(list, pick) {
+    let total = 0;
+    for (const item of list || []) total += Number(pick ? pick(item) : item) || 0;
+    return total;
+  }
+
+  ASM.util = { esc, attr, fmt, dom, raf, debounce, throttle, clamp, sum };
 })(window.ASM = window.ASM || {});
