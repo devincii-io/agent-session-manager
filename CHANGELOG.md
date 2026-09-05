@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.2.1] — 2026-09-05
 
 On a machine with years of sessions and two WSL distributions, 3.2.0 sat
 unresponsive for twenty to thirty seconds after opening. Three things added

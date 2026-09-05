@@ -274,9 +274,9 @@ one-file executable, which avoids paying multi-second Qt WebEngine extraction on
 every launch. Build the per-user installer with Inno Setup 6:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.2.0 packaging\agent-session-manager.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=3.2.1 packaging\agent-session-manager.iss
 Copy-Item README.md,LICENSE -Destination dist\AgentSessionManager
-Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.2.0-Windows-x64-portable.zip -Force
+Compress-Archive -Path dist\AgentSessionManager -DestinationPath dist\AgentSessionManager-v3.2.1-Windows-x64-portable.zip -Force
 ```
 
 On Linux the same spec produces one portable `dist/AgentSessionManager`. The
@@ -286,7 +286,7 @@ PyInstaller cannot cross-compile, so run it on the target OS. From WSL or Linux
 the guarded release helper builds in an isolated temporary environment:
 
 ```bash
-bash packaging/build-linux.sh 3.2.0
+bash packaging/build-linux.sh 3.2.1
 ```
 
 Before publishing, write `dist/SHA256SUMS.txt` with an entry for every artifact.
