@@ -115,9 +115,10 @@ not a claim that a conversation can be converted between agents, because it
 cannot.
 
 **Environment switcher.** Windows and each WSL distribution are independent
-sources. Enable only the distros you want in Settings. `All enabled` aggregates
-Claude and Codex metrics, and each source is scanned in its own request, so a
-slow WSL walk never delays the Windows figures.
+sources. Every launch starts on Windows alone; turn a distro on in Settings for
+the current run. `All enabled` aggregates Claude and Codex metrics. Each source
+is scanned in its own request on its own worker lane and painted as it lands,
+so a slow WSL walk never delays the Windows figures.
 
 **Global search.** Press Enter in the search box to search every session title
 and first prompt plus your full prompt history, with jump-to-session.
@@ -190,8 +191,11 @@ Transcripts get big. The whole design falls out of that.
 - The watcher covers transcripts, task boards, settings and the statusline
   capture, not the whole Claude home, so plugin and cache churn never triggers
   a refresh.
-- WSL distro names are discovered cheaply, off the boot path, and stay off by
-  default. A distro is resolved and scanned only once you enable and select it.
+- WSL distro names are discovered cheaply, off the boot path, and are off at
+  every launch. A distro is resolved and scanned only once you enable and
+  select it, on a worker lane of its own, so it can never hold up the Windows
+  figures. The distros container tooling installs for itself (Docker Desktop,
+  Podman, Rancher) are never offered.
 
 ## Keyboard
 

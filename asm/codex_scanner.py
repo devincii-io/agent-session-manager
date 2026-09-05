@@ -24,7 +24,7 @@ from typing import Callable
 
 from . import paths
 from .codex_session_parser import DetailBuilder, SessionSummary, SummaryBuilder
-from .session_parser import _loads, iter_file_records, read_new_lines
+from .session_parser import _loads, iter_file_records, iter_jsonl_files, read_new_lines
 
 try:
     import orjson as _orjson
@@ -99,6 +99,7 @@ class CodexScanner:
         self._archive_state_known = False
         self._archive_stamp: tuple[str, int, int] | None = None
         self._discovered_at = 0.0
+        self._generation = 0  # see Scanner.invalidate
         self._load_cache()
 
     # -- summary cache ------------------------------------------------------ #
@@ -129,6 +130,8 @@ class CodexScanner:
         self._save_cache(force=True)
 
     def invalidate(self) -> None:
+        """Lock-free, like :meth:`Scanner.invalidate`; safe from the GUI thread."""
+        self._generation += 1
         self._discovered_at = 0.0
 
     # -- incremental parsing -------------------------------------------------
@@ -210,16 +213,13 @@ class CodexScanner:
     def _discover(self, *, fresh: bool = False) -> None:
         if not fresh and time.time() - self._discovered_at < self.index_ttl:
             return
+        generation = self._generation
         self._load_titles()
         self._load_archived_state()
         summaries: list[SessionSummary] = []
         pending: list[tuple[Path, os.stat_result]] = []
         if self.sessions_root.is_dir():
-            for rollout in self.sessions_root.rglob("*.jsonl"):
-                try:
-                    stat = rollout.stat()
-                except OSError:
-                    continue
+            for rollout, stat in iter_jsonl_files(self.sessions_root, recursive=True):
                 cached = self._cached_summary(rollout, stat)
                 if cached is not None:
                     summaries.append(cached)
@@ -274,7 +274,8 @@ class CodexScanner:
         self._session_locators = session_locators
         self._root_summaries = roots
         self._child_summaries = children
-        self._discovered_at = time.time()
+        # A change that arrived during this walk forces the next call to walk again.
+        self._discovered_at = time.time() if generation == self._generation else 0.0
         self._save_cache()
 
     def _load_archived_state(self) -> None:

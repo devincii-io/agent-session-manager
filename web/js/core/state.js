@@ -39,12 +39,21 @@
     }
   }
 
+  // The scope is not remembered between launches: every run starts on the
+  // native machine and a WSL distribution is enabled for that run only, so a
+  // choice made weeks ago can never boot a distro at startup. Drop what
+  // earlier builds stored.
+  for (const key of ["asm.enabledSources", "asm.source", "csm.enabledSources", "csm.source"]) {
+    try { localStorage.removeItem(key); } catch { /* storage can be unavailable */ }
+  }
+
   const State = {
     /* -- scope ---------------------------------------------------------- */
     agent: stored("agent", "all"),                  // all | claude | codex
-    source: stored("source", "windows"),
+    source: "windows",                              // set from getAppInfo at boot
+    localSource: "windows",
     sources: [],
-    enabledSources: new Set(readJSON("enabledSources", ["windows"])),
+    enabledSources: new Set(["windows"]),
 
     /* -- data ----------------------------------------------------------- */
     projects: [],
@@ -140,10 +149,6 @@
   const persist = {
     set(name, value) { localStorage.setItem(PREFIX + name, String(value)); },
     json: storeJSON,
-    sources() {
-      storeJSON("enabledSources", [...State.enabledSources]);
-      persist.set("source", State.source);
-    },
     tabs() {
       storeJSON("openTabs", State.openTabs.slice(0, 12));
     },
@@ -189,14 +194,13 @@
 
   /** The source ids a backend call should scan, as the bridge expects them. */
   function sourceScope() {
-    const ids = State.source === "all" ? [...State.enabledSources] : [State.source];
-    return JSON.stringify(ids.length ? ids : ["windows"]);
+    return JSON.stringify(sourceIds());
   }
 
   /** The same ids, one per call, so a slow source never delays a fast one. */
   function sourceIds() {
     const ids = State.source === "all" ? [...State.enabledSources] : [State.source];
-    return ids.length ? ids : ["windows"];
+    return ids.length ? ids : [State.localSource];
   }
 
   function currentProject() {

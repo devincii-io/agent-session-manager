@@ -2,18 +2,28 @@ r"""Discover native and WSL agent-data sources without eagerly starting WSL.
 
 Distribution names are cheap to enumerate. A distro's Linux home and UNC path
 are resolved only when that source is explicitly enabled/selected, keeping the
-default Windows-only refresh path fast.
+default Windows-only refresh path fast. Resolving starts the distribution if it
+is not running, which can take ten seconds or more, so it happens once per
+distro and never twice at the same time.
 """
 
 from __future__ import annotations
 
 import platform
 import subprocess
+import threading
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from . import paths
+
+#: Distributions that container tooling installs for itself. They hold no user
+#: home worth scanning, and resolving one boots a whole VM, so they are never
+#: offered as sources.
+_INFRASTRUCTURE_DISTROS = (
+    "docker-desktop", "docker-desktop-data", "podman-machine", "rancher-desktop", "rancher-desktop-data",
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,16 @@ def _unc_home(distro: str, linux_home: str) -> str:
     return str(Path(f"\\\\wsl.localhost\\{distro}").joinpath(*parts))
 
 
+def is_infrastructure_distro(name: str) -> bool:
+    lowered = name.lower()
+    return any(lowered == item or lowered.startswith(item + "-") for item in _INFRASTRUCTURE_DISTROS)
+
+
+def is_remote_id(source_id: str) -> bool:
+    """Whether a source id names something reached over the network (WSL)."""
+    return source_id.startswith("wsl:")
+
+
 def local_source() -> Source:
     """The native source, without spawning ``wsl.exe``.
 
@@ -99,7 +119,7 @@ def discover_sources() -> tuple[Source, ...]:
     names = []
     for line in _decode_output(listed.stdout).splitlines():
         name = line.strip().replace("\x00", "")
-        if name and name not in names:
+        if name and name not in names and not is_infrastructure_distro(name):
             names.append(name)
     result.extend(
         Source(
@@ -112,11 +132,7 @@ def discover_sources() -> tuple[Source, ...]:
     return tuple(result)
 
 
-@lru_cache(maxsize=16)
-def resolve_source(source_id: str) -> Source | None:
-    source = next((item for item in discover_sources() if item.id == source_id), None)
-    if source is None or source.kind != "wsl" or source.resolved:
-        return source
+def _resolve(source: Source) -> Source:
     got = _run(["wsl.exe", "-d", source.distro, "--", "sh", "-lc", 'printf "%s" "$HOME"'], timeout=12)
     if got is None or got.returncode:
         return replace(source, available=False)
@@ -126,6 +142,40 @@ def resolve_source(source_id: str) -> Source | None:
     unc = _unc_home(source.distro, linux_home)
     available = Path(unc).is_dir()
     return replace(source, home=unc, linux_home=linux_home, available=available, resolved=available)
+
+
+# Resolution results, one per source id, plus one lock per id so that two
+# workers asking for the same distro at once spawn a single ``wsl.exe``. A
+# failed resolution is remembered too: retrying a twelve-second timeout on
+# every aggregate call would freeze the whole remote lane.
+_resolved: dict[str, Source | None] = {}
+_resolve_locks: dict[str, threading.Lock] = {}
+_registry_lock = threading.Lock()
+
+
+def resolve_source(source_id: str) -> Source | None:
+    with _registry_lock:
+        if source_id in _resolved:
+            return _resolved[source_id]
+        lock = _resolve_locks.setdefault(source_id, threading.Lock())
+    with lock:
+        with _registry_lock:
+            if source_id in _resolved:
+                return _resolved[source_id]
+        source = next((item for item in discover_sources() if item.id == source_id), None)
+        if source is not None and source.kind == "wsl" and not source.resolved:
+            source = _resolve(source)
+        with _registry_lock:
+            _resolved[source_id] = source
+        return source
+
+
+def _clear_resolved() -> None:
+    with _registry_lock:
+        _resolved.clear()
+
+
+resolve_source.cache_clear = _clear_resolved  # type: ignore[attr-defined]
 
 
 def refresh_sources() -> tuple[Source, ...]:

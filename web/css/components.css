@@ -347,10 +347,14 @@
 
 /* ---------- dialogs ---------- */
 
+/* No blur filter on the scrim: QtWebEngine re-blurs the whole viewport every
+   time anything behind it repaints (the live dot, skeleton shimmer, the
+   indexing counter), and on some Windows GPU stacks that shows as the dialog
+   flashing on and off. A test keeps the filter out; the scrim alone is enough. */
 .backdrop {
   position: fixed; inset: 0; z-index: 60; background: var(--scrim);
   display: flex; align-items: flex-start; justify-content: center;
-  padding-top: 12vh; backdrop-filter: blur(2px);
+  padding-top: 12vh;
 }
 .backdrop[hidden] { display: none; }
 .backdrop.center { align-items: center; padding-top: 0; }

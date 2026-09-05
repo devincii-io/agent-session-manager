@@ -197,6 +197,32 @@ class FrontendConventionTests(unittest.TestCase):
     def test_cleanup_keeps_a_filter_set_per_mode(self) -> None:
         self.assertIn("cleanupFilterSets", all_js())
 
+    def test_dialogs_never_use_backdrop_filter(self) -> None:
+        """QtWebEngine re-renders a backdrop-filter on every repaint behind it;
+        on some Windows GPU stacks the dialog flashes on and off."""
+        self.assertNotIn("backdrop-filter", all_css())
+
+    def test_source_scope_is_never_restored_from_storage(self) -> None:
+        """A WSL distro enabled weeks ago must not boot at the next launch."""
+        state = read("js", "core", "state.js")
+        self.assertNotIn('stored("source"', state)
+        self.assertNotIn('readJSON("enabledSources"', state)
+        self.assertNotIn('storeJSON("enabledSources"', all_js())
+        app = read("js", "app.js")
+        self.assertIn("State.enabledSources = new Set([info.local_source])", app)
+
+    def test_refresh_drops_the_remote_walks_too(self) -> None:
+        app = read("js", "app.js")
+        refresh = app.split("async function refreshAll()", 1)[1].split("async function refreshAfterDelete", 1)[0]
+        self.assertIn('call("invalidateCaches")', refresh)
+
+    def test_dialogs_own_the_keyboard_while_open(self) -> None:
+        app = read("js", "app.js")
+        self.assertIn("if (event.repeat) return;", app, "a held chord must not reopen the launcher on every repeat")
+        self.assertIn('dialog.id !== "command-backdrop"', app)
+        feedback = read("js", "ui", "feedback.js")
+        self.assertEqual(feedback.count("back._close = close"), 2, "Escape closes dynamic dialogs through _close")
+
     def test_journey_repaints_when_the_theme_changes(self) -> None:
         """The canvas is the one thing that cannot follow a CSS custom property."""
         journey = read("js", "views", "journey.js")

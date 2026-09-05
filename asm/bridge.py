@@ -18,6 +18,12 @@ the same time. Signals that face the web channel are always emitted from the
 GUI thread: worker threads hand their payloads over through an internal queued
 signal rather than emitting to the channel directly.
 
+Work is split into two lanes with their own worker threads. Anything that
+touches a WSL distribution (resolving its home, walking its UNC tree, even
+listing distros) runs on the remote lane; everything about the native machine
+runs on the local lane. A distro that takes twenty seconds to boot or a network
+walk over thousands of files therefore never holds up the Windows figures.
+
 Filesystem changes are debounced into a single ``dataChanged`` signal so the UI
 can refresh live without redrawing on every byte appended to a transcript.
 """
@@ -40,11 +46,15 @@ from . import __version__, actions, assistant, paths
 from . import update as updater
 from .scanner import INDEX_TTL_SECONDS, Scanner
 from .codex_scanner import CodexScanner
-from .sources import Source, discover_sources, local_source, refresh_sources, source_by_id
+from .sources import Source, discover_sources, is_remote_id, local_source, refresh_sources, source_by_id
 from .watcher import Watcher
 
-WORKER_THREADS = 2
+LOCAL_WORKERS = 2
+REMOTE_WORKERS = 2
 PROGRESS_INTERVAL = 0.08  # seconds between progress emits per source
+#: A WSL source has no watcher and every stat is a network round trip, so one
+#: walk serves the views for a long while. The refresh button clears it.
+REMOTE_INDEX_TTL_SECONDS = 600.0
 
 #: Aggregate work that can wait behind whatever the user is looking at.
 _BACKGROUND = {
@@ -62,10 +72,48 @@ _COALESCE = {
     "getProviderSessionDetail", "getSessionMeta", "getProviderSessions", "getProviderOverview",
     "getProviderGlobalStats", "getProviderAllSessions", "searchProvider", "getTrace",
 }
+#: Coalescing methods whose second argument is a source scope. The frontend
+#: fires these once per source, and a request for Windows must never be
+#: declared stale because a request for a WSL distro came in right after it.
+_SCOPED = {"getProviderOverview", "getProviderGlobalStats", "getProviderAllSessions", "searchProvider", "getTrace"}
+#: Methods that spawn ``wsl.exe`` whatever their arguments say.
+_REMOTE_METHODS = {"getSources", "refreshSources"}
+#: Scanner methods that only assign attributes and may run without the lock.
+_UNLOCKED = {"invalidate"}
 
 
 def _j(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _mentions_remote(value) -> bool:
+    """Whether any string in a (possibly JSON-encoded) argument names a WSL source."""
+    if isinstance(value, str):
+        if is_remote_id(value):
+            return True
+        if value[:1] in "[{":
+            try:
+                return _mentions_remote(json.loads(value))
+            except (json.JSONDecodeError, RecursionError):
+                return False
+        return False
+    if isinstance(value, dict):
+        return any(_mentions_remote(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_mentions_remote(item) for item in value)
+    return False
+
+
+def _lane_for(method: str, args: list) -> str:
+    if method in _REMOTE_METHODS or any(_mentions_remote(arg) for arg in args):
+        return "remote"
+    return "local"
+
+
+def _coalesce_key(method: str, args: list) -> str:
+    if method in _SCOPED and len(args) > 1:
+        return f"{method}:{args[1]}"
+    return method
 
 
 class _Guarded:
@@ -78,7 +126,7 @@ class _Guarded:
 
     def __getattr__(self, name):
         attr = getattr(self._target, name)
-        if not callable(attr):
+        if not callable(attr) or name in _UNLOCKED:
             return attr
 
         def call(*args, **kwargs):
@@ -86,6 +134,20 @@ class _Guarded:
                 return attr(*args, **kwargs)
 
         return call
+
+    def call_if_free(self, name: str, timeout: float) -> bool:
+        """Run a method if the lock can be had within ``timeout`` seconds.
+
+        Used at quit: a cache flush is worth two seconds, not a hung window
+        while a worker finishes a cold index on a slow disk.
+        """
+        if not self._lock.acquire(timeout=timeout):
+            return False
+        try:
+            getattr(self._target, name)()
+            return True
+        finally:
+            self._lock.release()
 
 
 class Bridge(QObject):
@@ -120,6 +182,7 @@ class Bridge(QObject):
         self._jobs: dict[str, tuple[QProcess, str, QTimer]] = {}
         self._update_busy = False
         self._progress_at: dict[str, float] = {}
+        self._roots: tuple[str, str] | None = None
 
         self._deliverReply.connect(self._on_deliver_reply, Qt.ConnectionType.QueuedConnection)
         self._deliverEvent.connect(self._on_deliver_event, Qt.ConnectionType.QueuedConnection)
@@ -136,16 +199,16 @@ class Bridge(QObject):
         self._max_wait.timeout.connect(self._flush)
         self._watcher.fileEvent.connect(self._on_fs_event)
 
-        # -- the worker pool ------------------------------------------------ #
-        self._queue: queue.PriorityQueue = queue.PriorityQueue()
+        # -- the worker pools, one queue per lane --------------------------- #
+        self._queues: dict[str, queue.PriorityQueue] = {"local": queue.PriorityQueue(), "remote": queue.PriorityQueue()}
         self._seq = 0
         self._latest: dict[str, str] = {}
-        self._workers = [
-            threading.Thread(target=self._work, name=f"asm-worker-{index}", daemon=True)
-            for index in range(WORKER_THREADS)
-        ]
-        for worker in self._workers:
-            worker.start()
+        self._workers: list[threading.Thread] = []
+        for lane, count in (("local", LOCAL_WORKERS), ("remote", REMOTE_WORKERS)):
+            for index in range(count):
+                worker = threading.Thread(target=self._work, args=(lane,), name=f"asm-{lane}-{index}", daemon=True)
+                worker.start()
+                self._workers.append(worker)
 
     # -- async lane --------------------------------------------------------- #
 
@@ -170,17 +233,18 @@ class Bridge(QObject):
             self.replied.emit(request_id, result if isinstance(result, str) else _j(result))
             return
         if method in _COALESCE:
-            self._latest[method] = request_id
+            self._latest[_coalesce_key(method, args)] = request_id
         priority = 1 if method in _BACKGROUND else 0
         self._seq += 1
-        self._queue.put((priority, self._seq, request_id, method, args))
+        self._queues[_lane_for(method, args)].put((priority, self._seq, request_id, method, args))
 
-    def _work(self) -> None:
+    def _work(self, lane: str) -> None:
+        tasks = self._queues[lane]
         while True:
-            _priority, _seq, request_id, method, args = self._queue.get()
+            _priority, _seq, request_id, method, args = tasks.get()
             if method is None:
                 return
-            if method in _COALESCE and self._latest.get(method) != request_id:
+            if method in _COALESCE and self._latest.get(_coalesce_key(method, args)) != request_id:
                 self._deliverReply.emit(request_id, _j({"stale": True}))
                 continue
             try:
@@ -212,12 +276,13 @@ class Bridge(QObject):
 
     def shutdown(self) -> None:
         """Flush caches and let the workers exit; called on application quit."""
-        for _index in self._workers:
-            self._queue.put((-1, 0, "", None, []))
+        for lane, count in (("local", LOCAL_WORKERS), ("remote", REMOTE_WORKERS)):
+            for _index in range(count):
+                self._queues[lane].put((-1, 0, "", None, []))
         for pair in list(self._source_scanners.values()):
             for scanner in pair:
                 try:
-                    scanner.flush()
+                    scanner.call_if_free("flush", timeout=2.0)
                 except Exception:
                     pass
 
@@ -230,12 +295,13 @@ class Bridge(QObject):
         with self._source_lock:
             pair = self._source_scanners.get(source.id)
             if pair is None:
+                ttl = REMOTE_INDEX_TTL_SECONDS if source.kind == "wsl" else INDEX_TTL_SECONDS
                 pair = (
                     _Guarded(Scanner(source.claude_home, cache_namespace=source.id,
                                      temp_roots=source.temp_roots, on_progress=self._on_progress,
-                                     index_ttl=INDEX_TTL_SECONDS)),
+                                     index_ttl=ttl)),
                     _Guarded(CodexScanner(source.codex_home, cache_namespace=source.id,
-                                          on_progress=self._on_progress, index_ttl=INDEX_TTL_SECONDS)),
+                                          on_progress=self._on_progress, index_ttl=ttl)),
                 )
                 self._source_scanners[source.id] = pair
         return source, pair[0], pair[1]
@@ -294,23 +360,36 @@ class Bridge(QObject):
         if not self._max_wait.isActive():
             self._max_wait.start()
 
-    @staticmethod
-    def _classify_path(path: str) -> str:
+    def _watched_roots(self) -> tuple[str, str]:
+        """Normalised projects/ and Codex sessions/ roots, resolved once.
+
+        This runs on the GUI thread for every filesystem event, and a busy
+        session produces hundreds a second, so it must not resolve paths.
+        """
+        if self._roots is None:
+            self._roots = tuple(
+                os.path.normcase(str(root.resolve())) + os.sep
+                for root in (paths.projects_dir(), paths.codex_sessions_dir())
+            )
+        return self._roots
+
+    def _classify_path(self, path: str) -> str:
         if path.endswith((".asm-statusline.json", ".csm-statusline.json")):
             return "statusline"
-        try:
-            rel = Path(path).resolve().relative_to(paths.projects_dir().resolve())
-            if len(rel.parts) == 2 and rel.suffix == ".jsonl":
-                return f"session:{rel.parts[0]}:{rel.stem}"
-            if len(rel.parts) >= 2:
-                return f"project:{rel.parts[0]}"
-        except (OSError, ValueError):
-            pass
-        try:
-            Path(path).resolve().relative_to(paths.codex_sessions_dir().resolve())
+        absolute = os.path.abspath(path)
+        normalised = os.path.normcase(absolute)
+        projects, codex = self._watched_roots()
+        if normalised.startswith(projects):
+            # Slice the un-normalised string: the frontend matches these names
+            # case-sensitively against the ids the scanner reported.
+            rel = Path(absolute[len(projects):])
+            parts = rel.parts
+            if len(parts) == 2 and rel.suffix == ".jsonl":
+                return f"session:{parts[0]}:{rel.stem}"
+            if len(parts) >= 2:
+                return f"project:{parts[0]}"
+        if normalised.startswith(codex):
             return "codex"
-        except (OSError, ValueError):
-            pass
         return "fs"
 
     def _flush(self) -> None:
@@ -319,7 +398,8 @@ class Bridge(QObject):
         reason = self._pending_reason or "fs"
         self._pending_reason = None
         # The memoised walks are stale now; the next aggregate call re-lists.
-        self._invalidate_all()
+        # Only the native scanners: the watcher sees nothing under WSL.
+        self._invalidate_all(remote=False)
         self.dataChanged.emit(reason)
 
     # -- read slots --------------------------------------------------------- #
@@ -740,16 +820,25 @@ class Bridge(QObject):
                 result = actions.delete_session(native_pid, sid, purge) if source.id == self._local_source_id else {"ok": False, "error": "WSL Claude cleanup is read-only for safety"}
             results.append({"provider": provider, "source_id": source_id, "project_id": pid, "session_id": sid, **result})
         completed = sum(1 for item in results if item.get("ok"))
-        self._invalidate_all()
+        self._invalidate_all(remote=True)
         return _j({"ok": completed > 0, "completed": completed, "count": len(results), "results": results})
 
-    def _invalidate_all(self) -> None:
-        for pair in list(self._source_scanners.values()):
+    def _invalidate_all(self, *, remote: bool) -> None:
+        """Drop the memoised walks. Lock-free, so safe on the GUI thread."""
+        for source_id, pair in list(self._source_scanners.items()):
+            if not remote and is_remote_id(source_id):
+                continue
             for scanner in pair:
                 try:
                     scanner.invalidate()
                 except Exception:
                     pass
+
+    @Slot(result=str)
+    def invalidateCaches(self) -> str:
+        """The refresh button: every source walks again, WSL included."""
+        self._invalidate_all(remote=True)
+        return _j({"ok": True})
 
     @Slot(str, result=str)
     def deleteStorageAssets(self, items_json: str) -> str:
@@ -774,7 +863,7 @@ class Bridge(QObject):
                 result = actions.delete_inventory_path(item["path"], allowed) if item and not item.get("protected") else {"ok": False, "error": "Asset is protected or no longer present"}
             results.append({**req, **result})
         completed = sum(1 for item in results if item.get("ok"))
-        self._invalidate_all()
+        self._invalidate_all(remote=False)
         return _j({"ok": completed > 0, "completed": completed, "count": len(results), "results": results})
 
     @Slot(str, str, result=str)

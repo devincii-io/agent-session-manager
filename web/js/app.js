@@ -388,9 +388,26 @@
   /* loaders                                                           */
   /* ================================================================ */
 
-  /** Call once per enabled source, so a slow WSL walk never delays Windows. */
-  function perSource(method, ...args) {
-    return Promise.all(scope.sourceIds().map((id) => call(method, ...args, JSON.stringify([id]))));
+  /**
+   * Call once per enabled source. `argsFor` receives one source's scope JSON
+   * and returns the call's arguments. `onPart(found)` runs each time a source
+   * answers, so the Windows figures paint while a WSL walk is still under
+   * way; the promise resolves with every answer once the last one lands.
+   */
+  async function perSource(method, argsFor, onPart) {
+    const found = [];
+    await Promise.all(scope.sourceIds().map(async (id) => {
+      const part = await call(method, ...argsFor(JSON.stringify([id])));
+      if (!part) return;
+      found.push(part);
+      if (onPart) onPart(found);
+    }));
+    return found;
+  }
+
+  /** The answer for the native machine when several sources answered. */
+  function localPart(found) {
+    return found.find((item) => (item.sources || []).some((source) => source.kind === "local")) || found[0];
   }
 
   async function loadSources(refresh = false) {
@@ -404,7 +421,6 @@
     if (State.source !== "all" && !State.enabledSources.has(State.source)) {
       State.source = local ? local.id : "windows";
     }
-    ASM.persist.sources();
     renderPickers();
   }
 
@@ -413,23 +429,24 @@
     if (!ASM.api.isLive()) return;
     const ticket = ++State.requestSeq.overview;
     State.loading.overview = true;
-    const results = await perSource("getProviderOverview", State.agent);
-    if (ticket !== State.requestSeq.overview) return;
-    State.loading.overview = false;
-    const found = results.filter(Boolean);
-    markTiming("projects");
-    if (found.length) {
+    await perSource("getProviderOverview", (id) => [State.agent, id], (found) => {
+      if (ticket !== State.requestSeq.overview) return;
+      State.loading.overview = false;
+      markTiming("projects");
       State.projects = found.flatMap((item) => item.projects || [])
         .sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
-      const first = found[0];
+      const first = localPart(found);
       State.agentHome = first.home;
       State.claudeHome = first.claude_home || State.claudeHome;
       State.codexHome = first.codex_home || State.codexHome;
-    }
-    State.overviewDirty = false;
-    if (State.browseMode === "projects") renderSidebar();
-    if (State.view === "overview" || State.view === "activity") renderMain();
-    else renderChrome();
+      State.overviewDirty = false;
+      if (State.browseMode === "projects") renderSidebar();
+      if (State.view === "overview" || State.view === "activity") renderMain();
+      else renderChrome();
+    });
+    if (ticket !== State.requestSeq.overview) return;
+    // No source answered: stop the skeletons rather than leave them shimmering.
+    if (State.loading.overview) { State.loading.overview = false; renderSidebar(); renderChrome(); }
   }
 
   /** The dashboard figures: spend, time, reliability, skills and agents. */
@@ -437,14 +454,16 @@
     if (!ASM.api.isLive()) return;
     const ticket = ++State.requestSeq.stats;
     State.loading.stats = true;
-    const results = await perSource("getProviderGlobalStats", State.agent);
+    await perSource("getProviderGlobalStats", (id) => [State.agent, id], (found) => {
+      if (ticket !== State.requestSeq.stats) return;
+      State.loading.stats = false;
+      markTiming("stats");
+      State.globalStats = found.length === 1 ? found[0] : mergeStats(found);
+      if (State.view === "overview" || State.view === "activity") renderMain();
+      else renderChrome();
+    });
     if (ticket !== State.requestSeq.stats) return;
-    State.loading.stats = false;
-    markTiming("stats");
-    const found = results.filter(Boolean);
-    if (found.length) State.globalStats = found.length === 1 ? found[0] : mergeStats(found);
-    if (State.view === "overview" || State.view === "activity") renderMain();
-    else renderChrome();
+    if (State.loading.stats) { State.loading.stats = false; renderChrome(); }
   }
 
   /** Fold per-source stats payloads into one, the way the bridge does. */
@@ -493,14 +512,20 @@
     if (State.recent && !force) return;
     const ticket = ++State.requestSeq.recent;
     State.loading.recent = true;
-    const results = await perSource("getProviderAllSessions", State.agent);
+    await perSource("getProviderAllSessions", (id) => [State.agent, id], (found) => {
+      if (ticket !== State.requestSeq.recent) return;
+      State.loading.recent = false;
+      markTiming("recent");
+      State.recent = found.flatMap((item) => item.sessions || []);
+      if (State.browseMode === "recent") renderSidebar();
+      if (State.view === "monitor") renderMain();
+    });
     if (ticket !== State.requestSeq.recent) return;
-    State.loading.recent = false;
-    markTiming("recent");
-    const found = results.filter(Boolean);
-    State.recent = found.flatMap((item) => item.sessions || []);
-    if (State.browseMode === "recent") renderSidebar();
-    if (State.view === "monitor") renderMain();
+    if (State.loading.recent) {
+      State.loading.recent = false;
+      State.recent = State.recent || [];
+      if (State.browseMode === "recent") renderSidebar();
+    }
   }
 
   async function loadProjectSessions(projectId) {
@@ -576,9 +601,8 @@
       renderMain();
       return;
     }
-    const results = await perSource("getProviderAllSessions", State.agent);
+    const found = await perSource("getProviderAllSessions", (id) => [State.agent, id]);
     if (ticket !== State.requestSeq.cleanup || State.view !== "cleanup") return;
-    const found = results.filter(Boolean);
     State.cleanup = {
       sessions: found.flatMap((item) => item.sessions || []),
       total_bytes: found.reduce((sum, item) => sum + (item.total_bytes || 0), 0),
@@ -605,8 +629,8 @@
     }
     renderMain();
     if (!State.tune.sessions) {
-      const results = await perSource("getProviderAllSessions", "claude");
-      State.tune.sessions = results.filter(Boolean).flatMap((item) => item.sessions || []);
+      const found = await perSource("getProviderAllSessions", (id) => ["claude", id]);
+      State.tune.sessions = found.flatMap((item) => item.sessions || []);
     }
     await ASM.views.tune.refreshGuidance();
     renderMain();
@@ -618,11 +642,9 @@
     if (State.trace && !force) return;
     const ticket = ++State.requestSeq.trace;
     State.loading.trace = true;
-    const results = await Promise.all(scope.sourceIds().map((id) =>
-      call("getTrace", State.agent, JSON.stringify([id]), 600)));
+    const found = await perSource("getTrace", (id) => [State.agent, id, 600]);
     if (ticket !== State.requestSeq.trace) return;
     State.loading.trace = false;
-    const found = results.filter(Boolean);
     State.trace = { events: found.flatMap((item) => item.events || []).sort((a, b) => (b.t || 0) - (a.t || 0)) };
     if (State.view === "activity") renderMain();
   }
@@ -795,7 +817,6 @@
     if (sourceId === State.source) return;
     ASM.api.send("leaveSession");
     State.source = sourceId;
-    ASM.persist.sources();
     resetScope();
     State.view = "overview";
     renderPickers();
@@ -813,7 +834,6 @@
     if (!enabled && State.source === sourceId) {
       State.source = (State.sources.find((item) => item.kind === "local") || {}).id || "windows";
     }
-    ASM.persist.sources();
     renderPickers();
     renderMain();
     loadOverview();
@@ -822,6 +842,8 @@
 
   async function refreshAll() {
     State.trace = null;
+    // WSL sources have no watcher; only an explicit refresh walks them again.
+    await call("invalidateCaches");
     await Promise.all([loadOverview(), loadStats(), loadRecent(true)]);
     if (State.projectId) await loadProjectSessions(State.projectId);
     if (State.view === "activity") await loadTrace(true);
@@ -864,10 +886,8 @@
     State.searchQuery = query;
     State.searchResults = null;
     renderMain();
-    const results = await Promise.all(scope.sourceIds().map((id) =>
-      call("searchProvider", State.agent, JSON.stringify([id]), query)));
+    const found = await perSource("searchProvider", (id) => [State.agent, id, query]);
     if (ticket !== State.requestSeq.search || State.view !== "search" || State.searchQuery !== query) return;
-    const found = results.filter(Boolean);
     State.searchResults = found.length ? {
       sessions: found.flatMap((item) => item.sessions || []),
       prompts: found.flatMap((item) => item.prompts || []),
@@ -934,12 +954,14 @@
   }
 
   function openPalette(mode = "all") {
-    State.paletteMode = mode;
-    State.paletteIndex = 0;
-    State.palettePreviousFocus = document.activeElement;
-    if (mode === "open") loadRecent();
     const back = dom.id("command-backdrop");
     const input = dom.id("command-input");
+    // Already up in this mode: keep what was typed and the highlighted row.
+    if (!back.hidden && State.paletteMode === mode) { input.focus(); return; }
+    State.paletteMode = mode;
+    State.paletteIndex = 0;
+    if (back.hidden) State.palettePreviousFocus = document.activeElement;
+    if (mode === "open") loadRecent();
     back.hidden = false;
     input.value = "";
     dom.id("palette-title").textContent = mode === "open" ? "Quick open a session" : "Command launcher";
@@ -1193,10 +1215,9 @@
       }
       case "sources-all-on": {
         State.sources.filter((source) => source.kind === "wsl").forEach((source) => State.enabledSources.add(source.id));
-        ASM.persist.sources();
         renderPickers();
         renderMain();
-        ASM.toast("WSL sources enabled — they scan when selected or included in All", "ok");
+        ASM.toast("WSL sources enabled for this run. They scan when selected or included in All.", "ok");
         return;
       }
       case "sources-all-off": {
@@ -1204,7 +1225,6 @@
         if (State.source === "all" || String(State.source).startsWith("wsl:")) {
           State.source = (State.sources.find((source) => source.kind === "local") || {}).id || "windows";
         }
-        ASM.persist.sources();
         renderPickers();
         loadOverview();
         loadStats();
@@ -1425,12 +1445,26 @@
       if (event.key === "Enter") { event.preventDefault(); await runPaletteEntry(State.paletteIndex); return; }
     }
 
-    if (event.key === "Escape") {
-      hideTip();
-      if (closeShortcuts()) { event.preventDefault(); return; }
-      const backdrop = dom.q(".backdrop:not([hidden])");
-      if (backdrop && backdrop.id !== "command-backdrop") { backdrop.remove(); event.preventDefault(); return; }
+    // A dialog owns the keyboard while it is up: Escape closes it and every
+    // other shortcut waits, so "?" cannot stack the shortcut sheet on top of
+    // a confirmation and Ctrl+K cannot open the launcher behind one.
+    const dialog = dom.q(".backdrop:not([hidden])");
+    if (dialog && dialog.id !== "command-backdrop") {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideTip();
+        if (!closeShortcuts()) {
+          if (typeof dialog._close === "function") dialog._close();
+          else dialog.remove();
+        }
+      }
+      return;
     }
+    if (event.key === "Escape") hideTip();
+
+    // A held chord auto-repeats keydown. Reopening the launcher on every
+    // repeat reset its input and list, which read as flicker.
+    if (event.repeat) return;
 
     const target = event.target;
     const editing = target && (target.matches("input, textarea, select") || target.isContentEditable);
@@ -1704,6 +1738,14 @@
         dom.id("app-version").textContent = `v${info.version}`;
       }
       document.body.classList.toggle("custom-window-controls", !!(info && info.custom_window_controls));
+      if (info && info.local_source) {
+        // Every launch scopes to the native machine. A WSL distribution is
+        // enabled for a run, never remembered: booting one and walking its
+        // tree over the network is a cost the user has to ask for each time.
+        State.localSource = info.local_source;
+        State.source = info.local_source;
+        State.enabledSources = new Set([info.local_source]);
+      }
       call("checkForUpdate", false);
       // Everything below is independent; each paints its region when it lands.
       loadSources();

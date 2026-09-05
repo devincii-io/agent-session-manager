@@ -20,6 +20,7 @@ line would multiply cost several-fold.
 from __future__ import annotations
 
 import json as _stdjson
+import os
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -81,6 +82,34 @@ def iter_file_records(path: Path):
                     continue
     except OSError:
         return
+
+
+def iter_jsonl_files(root: Path, *, recursive: bool):
+    """Yield ``(path, stat)`` for every ``*.jsonl`` under ``root``.
+
+    ``os.scandir`` hands back the size and mtime it already read from the
+    directory listing on Windows, so a walk costs one call per directory
+    instead of one ``stat`` per file. Over a WSL UNC path each of those stats
+    is a network round trip, which is where the difference is felt.
+    """
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive:
+                                stack.append(Path(entry.path))
+                            continue
+                        if not entry.name.endswith(".jsonl") or not entry.is_file(follow_symlinks=False):
+                            continue
+                        yield Path(entry.path), entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
 
 
 # --------------------------------------------------------------------------- #

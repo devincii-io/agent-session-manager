@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer  # noqa: E402
 
 from asm import bridge as bridge_module  # noqa: E402
+from asm import sources  # noqa: E402
 from asm.scanner import Scanner  # noqa: E402
 
 
@@ -65,9 +67,12 @@ class AsyncBridgeTests(unittest.TestCase):
             patch("asm.paths.claude_home", return_value=home),
             patch("asm.paths.cache_dir", return_value=Path(self.tmp.name) / "cache"),
             patch("asm.paths.codex_home", return_value=Path(self.tmp.name) / ".codex"),
+            # No wsl.exe in tests: the machine has one native source only.
+            patch("asm.sources.discover_sources", lambda: (sources.local_source(),)),
         ]
         for item in self.patches:
             item.start()
+        sources.resolve_source.cache_clear()
         scanner = Scanner(home, cache_namespace="bridge-test", temp_roots=[])
         self.bridge = bridge_module.Bridge(scanner, _FakeWatcher())
         self.replies: dict[str, dict] = {}
@@ -77,6 +82,7 @@ class AsyncBridgeTests(unittest.TestCase):
         self.bridge.shutdown()
         for item in self.patches:
             item.stop()
+        sources.resolve_source.cache_clear()
         self.tmp.cleanup()
 
     def test_invoke_answers_on_the_event_loop_without_blocking_it(self) -> None:
@@ -115,6 +121,70 @@ class AsyncBridgeTests(unittest.TestCase):
         self.bridge.invoke("info", "getAppInfo", "[]")
         self.assertIn("info", self.replies, "getAppInfo needs no worker and answers at once")
         self.assertTrue(self.replies["info"]["async"])
+
+    def test_requests_for_different_sources_do_not_supersede_each_other(self) -> None:
+        """The frontend fires one request per source. The Windows one used to
+        be answered stale because the WSL one arrived right behind it, so with
+        two sources enabled the Windows data never showed."""
+        self.bridge.invoke("win", "getProviderOverview", json.dumps(["claude", json.dumps(["windows", "local"])]))
+        self.bridge.invoke("wsl", "getProviderOverview", json.dumps(["claude", json.dumps(["wsl:Nowhere"])]))
+        _wait_for(lambda: "win" in self.replies and "wsl" in self.replies)
+        self.assertNotIn("stale", self.replies["win"])
+        self.assertEqual(len(self.replies["win"]["projects"]), 1)
+        self.assertEqual(self.replies["wsl"]["projects"], [], "an unknown distro answers empty, not stale")
+
+    def test_a_filesystem_event_never_waits_for_a_busy_scanner(self) -> None:
+        """_flush runs on the GUI thread on every debounced watcher event. It
+        must not take a scanner lock a worker holds through a cold index."""
+        guarded = self.bridge._scanner
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with guarded._lock:
+                held.set()
+                release.wait(5)
+
+        worker = threading.Thread(target=hold, daemon=True)
+        worker.start()
+        self.assertTrue(held.wait(2))
+        try:
+            started = time.monotonic()
+            self.bridge._flush()
+            self.assertLess(time.monotonic() - started, 0.5, "the GUI thread waited for the scanner lock")
+        finally:
+            release.set()
+            worker.join(2)
+
+    def test_refresh_drops_every_memoised_walk(self) -> None:
+        self.bridge.invoke("first", "getProviderOverview", json.dumps(["claude", json.dumps(["windows", "local"])]))
+        _wait_for(lambda: "first" in self.replies)
+        self.assertIsNotNone(self.bridge._scanner._target._index_memo)
+        self.bridge.invoke("drop", "invalidateCaches", "[]")
+        _wait_for(lambda: "drop" in self.replies)
+        self.assertTrue(self.replies["drop"]["ok"])
+        self.assertIsNone(self.bridge._scanner._target._index_memo)
+
+
+class LaneTests(unittest.TestCase):
+    def test_anything_naming_a_wsl_source_runs_on_the_remote_lane(self) -> None:
+        lane = bridge_module._lane_for
+        self.assertEqual(lane("getProviderOverview", ["claude", '["windows"]']), "local")
+        self.assertEqual(lane("getProviderOverview", ["claude", '["wsl:Ubuntu-24.04"]']), "remote")
+        self.assertEqual(lane("getProviderSessions", ["claude", "wsl:Ubuntu-24.04::-home-me-work"]), "remote")
+        self.assertEqual(lane("getProviderSessions", ["claude", "windows::C--Users-me-work"]), "local")
+        self.assertEqual(lane("cleanupSessions", ['[{"source_id": "wsl:Ubuntu-24.04", "session_id": "x"}]', False]), "remote")
+        self.assertEqual(lane("launchAgent", ["claude", "wsl:Ubuntu-24.04", "/home/me", "", "resume"]), "remote")
+        self.assertEqual(lane("getSources", []), "remote", "listing distros spawns wsl.exe")
+        self.assertEqual(lane("getSettings", []), "local")
+
+    def test_coalescing_is_keyed_by_source_scope(self) -> None:
+        key = bridge_module._coalesce_key
+        self.assertNotEqual(key("getProviderOverview", ["claude", '["windows"]']),
+                            key("getProviderOverview", ["claude", '["wsl:Ubuntu-24.04"]']))
+        self.assertEqual(key("getSessionMeta", ["claude", "windows::p", "s1"]),
+                         key("getSessionMeta", ["claude", "windows::p", "s2"]),
+                         "only the newest open session matters")
 
 
 class MergeStatsTests(unittest.TestCase):

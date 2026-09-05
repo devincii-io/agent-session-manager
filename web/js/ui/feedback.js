@@ -69,6 +69,7 @@
       back.remove();
       if (previous && previous.focus) previous.focus();
     };
+    back._close = close;  // the shell's Escape handler closes through this, restoring focus
     back.addEventListener("click", (event) => {
       const action = event.target.dataset ? event.target.dataset.modal : null;
       if (event.target === back || action === "cancel") close();
@@ -95,6 +96,7 @@
     document.body.appendChild(back);
     focusFirst(back);
     const close = () => { back.remove(); if (previous && previous.focus) previous.focus(); };
+    back._close = close;
     back.addEventListener("click", async (event) => {
       const action = event.target.dataset ? event.target.dataset.modal : null;
       if (event.target === back || action === "cancel") close();

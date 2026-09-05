@@ -169,7 +169,7 @@
           ${State.enabledSources.has(source.id) ? "checked" : ""} ${source.kind === "local" ? "disabled" : ""}>
           <span class="track"><span class="thumb"></span></span></label>
       </div>`).join("")}</div>`, {
-      desc: "Windows is always on. WSL distributions are opt-in — only enabled sources are scanned, which keeps refreshes fast.",
+      desc: "Windows is always on. WSL distributions are off at every launch. Turn one on here for this run; it is scanned only while selected or included in All enabled.",
       actions: `<button class="btn sm" data-action="sources-all-on">Enable WSL</button>
         <button class="btn sm" data-action="sources-all-off">Disable WSL</button>
         <button class="btn sm" data-action="refresh-sources">Detect again</button>`,

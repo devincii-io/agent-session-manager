@@ -35,6 +35,7 @@ from .session_parser import (
     SessionSummary,
     SummaryBuilder,
     _loads,
+    iter_jsonl_files,
     read_new_lines,
     ts_ms,
 )
@@ -89,6 +90,9 @@ class Scanner:
         self._history_offset = 0
         self._index_memo: tuple[float, list] | None = None
         self._asset_memo: tuple[float, dict] | None = None
+        # Bumped by invalidate(); a walk that started before the bump is not
+        # memoised, so a change during a long cold index is never served stale.
+        self._generation = 0
         self.on_progress = on_progress
         self.label = cache_namespace
         # How long one walk of projects/ may serve repeated aggregate calls.
@@ -127,7 +131,13 @@ class Scanner:
         self._save_cache(force=True)
 
     def invalidate(self) -> None:
-        """The filesystem changed: the next aggregate call walks again."""
+        """The filesystem changed: the next aggregate call walks again.
+
+        Called from the GUI thread without the scanner lock (plain attribute
+        writes are safe under the GIL), so a watcher event never waits behind
+        a worker that is in the middle of a long parse.
+        """
+        self._generation += 1
         self._index_memo = None
         self._asset_memo = None
 
@@ -186,6 +196,7 @@ class Scanner:
         memo = self._index_memo
         if memo is not None and not fresh and time.time() - memo[0] < self.index_ttl:
             return memo[1]
+        generation = self._generation
         root = self.projects_root
         result: list[tuple[Path, list[SessionSummary]]] = []
         if not root.is_dir():
@@ -194,15 +205,16 @@ class Scanner:
 
         pending: list[tuple[Path, os.stat_result]] = []
         listing: list[tuple[Path, list]] = []
-        for pdir in sorted(root.iterdir()):
-            if not pdir.is_dir():
-                continue
+        try:
+            with os.scandir(root) as entries:
+                project_dirs = sorted(
+                    (Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)),
+                )
+        except OSError:
+            project_dirs = []
+        for pdir in project_dirs:
             rows: list = []
-            for f in pdir.glob("*.jsonl"):
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
+            for f, st in iter_jsonl_files(pdir, recursive=False):
                 cached = self._cached_summary(f, st)
                 if cached is None:
                     pending.append((f, st))
@@ -229,7 +241,8 @@ class Scanner:
             summaries = [parsed[str(row)] if isinstance(row, Path) else row for row in rows]
             result.append((pdir, summaries))
         self._save_cache()
-        self._index_memo = (time.time(), result)
+        if generation == self._generation:
+            self._index_memo = (time.time(), result)
         return result
 
     @staticmethod
@@ -347,7 +360,9 @@ class Scanner:
         trip. The result is memoised because these directories change slowly.
         """
         memo = self._asset_memo
-        if memo is not None and self.index_ttl and time.time() - memo[0] < ASSET_TTL_SECONDS:
+        # A remote source gets a long index TTL; its asset walk is slower still.
+        ttl = max(ASSET_TTL_SECONDS, self.index_ttl)
+        if memo is not None and self.index_ttl and time.time() - memo[0] < ttl:
             return memo[1]
         result: dict[str, dict] = {}
         roots = (

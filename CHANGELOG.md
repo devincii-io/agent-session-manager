@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+On a machine with years of sessions and two WSL distributions, 3.2.0 sat
+unresponsive for twenty to thirty seconds after opening. Three things added
+up: a distro enabled in an earlier build was still enabled and got resolved at
+boot, which starts the distro; the two worker threads were both busy with
+that, so the Windows figures waited behind it; and every filesystem event
+made the GUI thread wait for a scanner lock held by the cold index. The
+command launcher also flashed on and off while it was open.
+
+### Fixed
+- **Nothing about WSL is remembered between launches.** Every run starts on
+  Windows alone. A distribution is enabled in Settings for the current run and
+  resolved only when it is selected or included in `All enabled`. The stored
+  choice from earlier builds is dropped on first start.
+- **A filesystem event never waits for a scan.** Invalidating the memoised
+  walks is lock-free now, so the GUI thread stays responsive while a cold index
+  runs. A walk that was under way when the change arrived is not memoised.
+- **Per-source requests no longer cancel each other.** A request for Windows
+  was answered "stale" when the request for a WSL distro arrived right behind
+  it, so with two sources the Windows data never showed. Coalescing is now
+  keyed by source.
+- The distributions container tooling installs for itself (`docker-desktop`,
+  `podman-machine-*`, `rancher-desktop`) are never offered as sources.
+  Resolving one boots a whole VM for a home nobody works in.
+- **The command launcher stopped flickering.** The dialog scrim no longer uses
+  `backdrop-filter`, which QtWebEngine re-renders on every repaint behind it,
+  and a held Ctrl+K no longer reopens the launcher on each key repeat.
+- While a confirmation or file dialog is open, shortcuts wait; Escape closes it
+  and puts focus back where it was.
+
+### Changed
+- **Two worker lanes.** Anything that touches a WSL distribution (listing
+  distros, resolving a home, walking a UNC tree) runs on its own pair of
+  threads. The local lane is never blocked by a distro that takes twenty
+  seconds to boot.
+- A WSL source is walked at most once every ten minutes unless you press
+  refresh, which now drops every memoised walk. The watcher only sees local
+  changes, so a local edit no longer re-walks a network tree every four
+  seconds.
+- The overview, dashboard and recent list paint each source as it answers
+  instead of waiting for the slowest one.
+- Directory walks use `os.scandir` and reuse the size and mtime from the
+  listing instead of a second `stat` per file. On a UNC path each of those
+  was a network round trip.
+- Resolving a distro happens once per distro even when two requests ask at
+  the same time, and a failed resolution is remembered until the next detect.
+- Closing the app waits at most two seconds per scanner for the cache flush
+  instead of hanging behind a running index.
+
 ## [3.2.0] — 2026-09-05
 
 The app was slow to open and hard to read. Every backend call ran on the GUI
