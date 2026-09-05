@@ -4,6 +4,80 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] — 2026-09-05
+
+The app was slow to open and hard to read. Every backend call ran on the GUI
+thread, boot waited for the slowest scan before painting anything, the Codex
+archive was re-parsed on every launch, and the screens were walls of
+equal-weight boxes with numbers nobody asked for. This release fixes the
+speed at the root and rebuilds the interface around the questions people
+actually open it with.
+
+### Added
+- **Overview dashboard.** One period control (7, 30, 90 days, all time)
+  scopes spend, time with agents, sessions and cache savings, each with a
+  trend against the period before and a sparkline. Spend per day is stacked
+  by model or by project with a trailing seven-day average. A sortable
+  project table, the weekday-by-hour grid of when you work with a sentence
+  that reads it for you, models, the work mix, and a reliability list (failed
+  calls, compactions, interruptions, kills, subagents, skills).
+- **Session summary**, the new first tab of a session: spend, active time
+  versus wall clock, context fill with its peak, reliability, and findings in
+  plain sentences — where the hours went, the longest idle stretch, each
+  compaction and its size, the failure rate by tool, the command that ran
+  eighteen times, the file read nine times, what caching saved, the median
+  time to first reply. Then the context window with compaction markers and
+  the window ceiling, the running cost, where the time went, files by reads
+  and edits, commands, errors by tool.
+- **Traceability of skills, agents, kills and interruptions.** Every session
+  records `Skill` invocations, subagents spawned (with type, description and
+  how long they ran), `TaskStop`/`KillShell` calls, turns you interrupted,
+  slash commands and compactions. A **Trace** tab lists them per session; the
+  new **Activity** view rolls them up across every project and both agents,
+  with tables by skill and by agent type and a filterable log that opens the
+  session an event happened in.
+- **Per-day ledger and active time.** Each session carries what it cost and
+  produced on each local day, and how long it was actually working (pauses
+  over five minutes are idle, and are kept so the UI can say when).
+- **Project view** with spend per day, a sortable session table (time, turns,
+  errors, context, spend) and the skills and agents used in that project.
+- An **indexing counter** in the status bar while cold files are parsed.
+- Tests for the per-day ledger, the trace, the disk caches, the async bridge
+  lane and the frontend conventions the new architecture depends on.
+
+### Changed
+- **Nothing blocks the interface.** The bridge gained an asynchronous lane:
+  reads run on worker threads, answer over a signal, are coalesced when a
+  newer request supersedes them, and stay off the GUI thread entirely.
+  Scanners are guarded by locks, so a Claude parse and a Codex parse run at
+  the same time.
+- **Boot is parallel and progressive.** The sidebar, the dashboard and the
+  recent list each paint when their own request lands; WSL discovery no
+  longer runs before the window is even shown. On a warm cache everything is
+  on screen about 400 ms after the page loads.
+- **Codex rollouts are cached on disk** like Claude transcripts and parsed
+  with `orjson`; the archive scan went from about 1.3 s on every launch to a
+  few milliseconds.
+- The summary cache is written at most every two seconds while sessions are
+  live, and one memoised walk of `projects/` serves the overview, the recent
+  list and the global stats.
+- The file watcher covers transcripts, task boards, settings and the
+  statusline capture instead of the whole Claude home.
+- A live tick re-renders the open session's body, not the whole pane; scroll
+  position and selection survive.
+- Every chart carries a hover readout through one shared tooltip; values are
+  also in the tables beside them. Category and series colours were re-stepped
+  as a validated, ordered palette for colour-vision-deficiency separation in
+  both themes.
+- The sidebar shows title, project, spend and active time per row; the counts
+  moved into the hover readout. The Monitor works for "All agents".
+- The session tabs are Summary, Timeline, Transcript, Trace, then only the
+  tabs that have something to show, and Details.
+
+### Removed
+- The Analytics tab; its charts moved into the summary, and the ones that
+  said nothing (output per turn, activity by UTC hour) are gone.
+
 ## [3.1.0] — 2026-08-20
 
 3.0.0 called every prompt a "goal". That was the wrong word for the wrong thing.
